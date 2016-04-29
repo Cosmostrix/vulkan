@@ -1,11 +1,16 @@
 {-# LANGUAGE QuasiQuotes, OverloadedStrings, LambdaCase #-}
-{-# LANGUAGE Arrows #-}
+{-# LANGUAGE Arrows, RecordWildCards #-}
 import Control.Monad (forM_)
 import Data.Text (Text, unpack)
-import qualified Data.Text.Lazy.IO as LTIO
+import qualified Data.Text.Lazy.IO as L
 import System.Environment
 import Text.Shakespeare.Text
 import Text.XML.HXT.Core
+import Data.List
+import Data.Monoid
+import Data.String
+import Data.Char (toLower, toUpper)
+import Data.Bits
 
 main :: IO ()
 main = do
@@ -16,9 +21,114 @@ main = do
 
 main' :: String -> String -> IO ()
 main' src destdir = do
-  [items] <- runX (readDocument [withRemoveWS yes] src >>> parse)
-  forM_ [items] $ \item -> LTIO.putStrLn
-    [lt|#{show item}|]
+  L.putStrLn [lt|−− | Complete Vulkan raw API bindings.
+module Graphics.Vulkan.Bindings where
+import Foreign
+import Foreign.C
+import Data.Bits
+import Data.Int
+import Data.Word
+import Numeric.Half
+import Numeric.Fixed
+|]
+  [Registry {..}] <- runX (readDocument [withRemoveWS yes] src >>> parse)
+  forM_ registryTypes $ \case
+    Struct {..} -> L.putStrLn [lt|
+-- |
+-- #{showUsage typeValidity}
+data #{typeName} = #{typeName}#{members} deriving (Eq, Show)
+  -- ReturnedOnly? = #{show typeReturnedOnly}
+
+instance Storable #{typeName} where
+  sizeOf _ = 0
+  peek = return ()
+  poke = return ()
+|] where members = intercalate "\n" . braced $
+                     map (showMember typeName) typeMembers
+    Basetype {..} ->
+      L.putStrLn [lt|type #{typeName} = #{haskType' typeType}|]
+    _ -> return ()
+  forM_ registryEnums $ \(Enumeratees {..}) -> do
+    let derivings = case enumsType of
+                      "enum" -> "(Eq, Ord, Show)" :: Text
+                      "bitmask" -> "(Eq, Ord, Bits, FiniteBits, Show)" -- allow binary ops
+    L.putStrLn [lt|-- | #{enumsComment}
+newtype #{enumsName} = #{enumsName} deriving #{derivings}
+
+#{mconcat $ map (showEnum enumsName) enumsList}
+|]
+  forM_ registryCommands $ \(Command {..}) ->
+    L.putStrLn [lt|
+-- | @#{commandName} {params}@
+-- #{showUsage commandValidity}
+-- 
+-- s:#{commandSuccessCodes} e:#{commandErrorCodes} q:#{commandQueues} rp:#{commandRenderpass} cbl:#{commandCmdBufferLevel} iesp:#{show commandImplicitExternSyncParams}
+#{commandName} :: -> IO #{commandReturn}
+#{commandName} {params} =
+  #{mconcat $ map showParameter commandParameters}
+|]
+
+showUsage :: [String] -> String
+showUsage xs = mconcat [ "\n-- * " ++ x | x <- xs ]
+
+braced :: (Monoid a, IsString a) => [a] -> [a]
+braced [] = []
+braced [x] = ["", "  { " <> x <> " }"]
+braced (x : xs)  = ["", "  { " <> x] ++ ["  , " <> y | y <- xs] ++ ["  }"]
+
+lowerCamel :: String -> String
+lowerCamel [] = []
+lowerCamel (x:xs) = toLower x : xs
+
+upperCamel :: String -> String
+upperCamel [] = []
+upperCamel (x:xs) = toUpper x : xs
+
+showMember :: String -> Member -> String
+showMember typeName (Member {..}) =
+  unpack [st|#{lowerCamel typeName}_#{memberName} :: #{wrapMaybe $ wrapPtrs memberLen $ haskType' memberType}#{comment}|]
+  where wrapMaybe x = if memberOptional then "Maybe (" ++ x ++ ")" else x :: String
+        comment = if enum <> len <> nav /= ""
+                  then [st|
+  -- ^#{enum}#{len}#{nav}|]
+                  else ""
+        enum = maybe "" (\enum -> [st| Max: #{enum}.|]) memberEnum
+        len = maybe "" (\len -> [st| Length: #{len}.|]) memberLen
+        nav = if not memberNoautovalidity then "" else " Noautovalidity."
+        wrapPtrs l x = maybe x (\len ->
+                         case length (elemIndices ',' len) of
+                           0 -> "Ptr " ++ x
+                           1 -> "Ptr (Ptr " ++ x ++ ")" :: String) l
+
+showEnum :: String -> Enumeratee -> Text
+showEnum enumsName (EnumValue {..}) =
+  [st|-- | #{enumComment}
+pattern #{enumName} = #{enumsName} #{enumValue}
+|]
+showEnum enumsName (EnumBitpos {..}) =
+  [st|-- | #{enumComment}
+pattern #{enumName} = #{enumsName} #{value}
+|] where value = bit enumBitpos :: Int
+
+showParameter :: Parameter -> Text
+showParameter (Parameter {..}) = [st|param #{parameterName} #{haskType parameterType} opt:#{parameterOptional} es:#{parameterExternsync} len:#{show parameterLen} nav:#{show parameterNoautovalidity}
+|]
+
+haskType :: String -> String
+haskType = \case
+  "void" -> "()"
+  "char" -> "CChar"
+  "float" -> "Float"
+  "uint8_t" -> "Word8"
+  "uint32_t" -> "Word32"
+  "uint64_t" -> "Word64"
+  "int32_t" -> "Int32"
+  "size_t" -> "CSize"
+  x -> x
+
+haskType' :: String -> String
+haskType' "void" = "Ptr ()" -- for *pNext
+haskType' rest = haskType rest
 
 data Registry = Registry
   { registryTypes :: [Type]
@@ -145,7 +255,7 @@ data Parameter = Parameter
   { parameterName :: String
   , parameterType :: String
   , parameterOptional :: String -- "true", "false,true"
-  , parameterExternsync :: Bool
+  , parameterExternsync :: String -- "true", ...
   , parameterLen :: Maybe String
   , parameterNoautovalidity :: Bool
   } deriving (Eq, Show)
@@ -226,6 +336,10 @@ parseTypes = proc x -> do
       comment <- getAttrValue "comment" -< t
       members <- listA $ parseMembers <<< to "member" -< t
       returnA -< Union name comment members
+    Just "basetype" -> do
+      name <- getContent <<< to "name" -< t
+      typ <- getContent <<< to "type" -< t
+      returnA -< Basetype name typ
     Just "bitmask" -> do
       name <- getContent <<< to "name" -< t
       typ <- getContent <<< to "type" -< t
@@ -291,7 +405,7 @@ parseParameters = proc x -> do
   name <- getContent <<< to "name" -< x
   typ <- getContent <<< to "type" -< x
   optional <- getAttrValue "optional" -< x
-  externalsync <- boolean (getAttrValue0 "externalsync") -< x
+  externalsync <- getAttrValue "externsync" -< x
   len <- perhaps (getAttrValue0 "len") -< x
   noautovalidity <- boolean (getAttrValue0 "noautovalidity") -< x
   returnA -< Parameter name typ optional externalsync len noautovalidity
@@ -358,4 +472,3 @@ parseUsage = proc x -> do
   command <- getAttrValue0 "command" -< x
   text <- getContent -< x
   returnA -< (command, text)
-
