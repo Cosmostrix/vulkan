@@ -1,16 +1,18 @@
 {-# LANGUAGE QuasiQuotes, OverloadedStrings, LambdaCase #-}
-{-# LANGUAGE Arrows, RecordWildCards #-}
+{-# LANGUAGE RecordWildCards #-}
 import Control.Monad (forM_)
 import Data.Text (Text, unpack)
 import qualified Data.Text.Lazy.IO as L
 import System.Environment
 import Text.Shakespeare.Text
-import Text.XML.HXT.Core
 import Data.List
 import Data.Monoid
 import Data.String
 import Data.Char (toLower, toUpper)
 import Data.Bits
+
+import VkRegistry
+import VkParser
 
 main :: IO ()
 main = do
@@ -21,7 +23,22 @@ main = do
 
 main' :: String -> String -> IO ()
 main' src destdir = do
-  L.putStrLn [lt|−− | Complete Vulkan raw API bindings.
+  Registry {..} <- mapToHask <$> parseVkXml src
+  L.putStrLn [lt|{-# LANGUAGE CPP #-}
+{-# LANGUAGE PatternSynonyms #-}
+{-# LANGUAGE GeneralizedNewtypeDeriving #-}
+{- # LANGUAGE Strict #-}
+{- # LANGUAGE StrictData #-}
+-----------------------------------------------------------------------------
+-- |
+-- Copyright   :  (C) 2016 Cosmostrix
+-- License     :  BSD-style (see the file LICENSE)
+-- Maintainer  :  Cosmostrix <cosmos@lunakit.org>
+-- Stability   :  experimental
+-- Portability :  portable
+--
+-- Complete Vulkan raw API bindings.
+----------------------------------------------------------------------------
 module Graphics.Vulkan.Bindings where
 import Foreign
 import Foreign.C
@@ -30,42 +47,86 @@ import Data.Int
 import Data.Word
 import Numeric.Half
 import Numeric.Fixed
+import Control.Monad.IO.Class
+
+type VkDataPtr = Ptr ()
+
+-- X11/Xlib.h
+data Display
+data VisualID
+data Window
+
+-- android/native_window.h
+data ANativeWindow
+
+-- mir_toolkit/client_types.h
+data MirConnection
+data MirSurface
+
+-- wayland-client.h
+data WlDisplay -- ^ wl_display
+data WlSurface -- ^ wl_surface
+
+-- windows.h
+data HINSTANCE
+data HWND
+
+-- xcb/xcb.h
+data XcbConnection -- ^ xcb_connection_t
+data XcbVisualId -- ^ xcb_visualid_t
+data XcbWindow -- ^ xcb_window_t
 |]
-  [Registry {..}] <- runX (readDocument [withRemoveWS yes] src >>> parse)
   forM_ registryTypes $ \case
     Struct {..} -> L.putStrLn [lt|
 -- |
 -- #{showUsage typeValidity}
-data #{typeName} = #{typeName}#{members} deriving (Eq, Show)
+data #{typeName} = #{typeName}#{members} --deriving (Eq, Show)
   -- ReturnedOnly? = #{show typeReturnedOnly}
 
 instance Storable #{typeName} where
+  alignment _ = 0
   sizeOf _ = 0
-  peek = return ()
-  poke = return ()
+  peek _ = return undefined
+  poke _ _ = return ()
 |] where members = intercalate "\n" . braced $
                      map (showMember typeName) typeMembers
+    Union {..} -> do
+      let showCon (Member {..}) = unpack
+            [st|#{typeName}#{upperCamel memberName} #{memberType}|]
+      let constructors = intercalate " | " $ map showCon typeMembers
+      L.putStrLn [lt|data #{typeName} = #{constructors} --deriving (Eq, Show)|]
     Basetype {..} ->
-      L.putStrLn [lt|type #{typeName} = #{haskType' typeType}|]
+      L.putStrLn [lt|type #{typeName} = #{typeType}|]
+    Bitmask {..} ->
+      L.putStrLn [lt|-- | Requires: #{typeRequires}
+type #{typeName} = #{typeType}|]
+    Handle {..} ->
+      L.putStrLn [lt|-- | Parent: #{show typeParent}
+type #{typeName} = #{typeType}|]
+    Funcpointer {..} ->
+      L.putStrLn [lt|type #{typeName} = #{intercalate " -> " typeArgs}|]
     _ -> return ()
   forM_ registryEnums $ \(Enumeratees {..}) -> do
     let derivings = case enumsType of
                       "enum" -> "(Eq, Ord, Show)" :: Text
                       "bitmask" -> "(Eq, Ord, Bits, FiniteBits, Show)" -- allow binary ops
     L.putStrLn [lt|-- | #{enumsComment}
-newtype #{enumsName} = #{enumsName} deriving #{derivings}
+newtype #{enumsName} = #{enumsName} Int deriving #{derivings}
 
 #{mconcat $ map (showEnum enumsName) enumsList}
 |]
   forM_ registryCommands $ \(Command {..}) ->
+    let arguments = intercalate " " $ map parameterName commandParameters in
+    let commentedTypes = [ (parameterType, unpack [st|#{parameterName}. Optional:#{parameterOptional} ExternSync:#{parameterExternsync} Len:#{show parameterLen} Noautovalidity:#{show parameterNoautovalidity}|]) | Parameter {..} <- commandParameters ] ++ [("m " ++ commandReturn, "")] in
     L.putStrLn [lt|
--- | @#{commandName} {params}@
+-- | @#{commandName} #{arguments}@
 -- #{showUsage commandValidity}
 -- 
 -- s:#{commandSuccessCodes} e:#{commandErrorCodes} q:#{commandQueues} rp:#{commandRenderpass} cbl:#{commandCmdBufferLevel} iesp:#{show commandImplicitExternSyncParams}
-#{commandName} :: -> IO #{commandReturn}
-#{commandName} {params} =
-  #{mconcat $ map showParameter commandParameters}
+#{commandName} :: MonadIO m
+  => #{showCommentedTypes commentedTypes}
+#{commandName} #{arguments} =
+  liftIO undefined
 |]
 
 showUsage :: [String] -> String
@@ -86,33 +147,25 @@ upperCamel (x:xs) = toUpper x : xs
 
 showMember :: String -> Member -> String
 showMember typeName (Member {..}) =
-  unpack [st|#{lowerCamel typeName}_#{memberName} :: #{wrapMaybe $ wrapPtrs memberLen $ haskType' memberType}#{comment}|]
-  where wrapMaybe x = if memberOptional then "Maybe (" ++ x ++ ")" else x :: String
-        comment = if enum <> len <> nav /= ""
+  unpack [st|#{lowerCamel typeName}_#{memberName} :: #{memberType}#{comment}|]
+  where comment = if opt <> enum <> len <> nav /= ""
                   then [st|
-  -- ^#{enum}#{len}#{nav}|]
+  -- ^#{opt}#{enum}#{len}#{nav}|]
                   else ""
+        opt = if memberOptional then " Optional." else ""
         enum = maybe "" (\enum -> [st| Max: #{enum}.|]) memberEnum
         len = maybe "" (\len -> [st| Length: #{len}.|]) memberLen
-        nav = if not memberNoautovalidity then "" else " Noautovalidity."
-        wrapPtrs l x = maybe x (\len ->
-                         case length (elemIndices ',' len) of
-                           0 -> "Ptr " ++ x
-                           1 -> "Ptr (Ptr " ++ x ++ ")" :: String) l
+        nav = if memberNoautovalidity then " Noautovalidity." else ""
 
 showEnum :: String -> Enumeratee -> Text
 showEnum enumsName (EnumValue {..}) =
   [st|-- | #{enumComment}
-pattern #{enumName} = #{enumsName} #{enumValue}
-|]
+pattern #{enumName} = #{enumsName} #{value}
+|] where value = if head enumValue == '-' then "(" ++ enumValue ++ ")" else enumValue
 showEnum enumsName (EnumBitpos {..}) =
   [st|-- | #{enumComment}
 pattern #{enumName} = #{enumsName} #{value}
 |] where value = bit enumBitpos :: Int
-
-showParameter :: Parameter -> Text
-showParameter (Parameter {..}) = [st|param #{parameterName} #{haskType parameterType} opt:#{parameterOptional} es:#{parameterExternsync} len:#{show parameterLen} nav:#{show parameterNoautovalidity}
-|]
 
 haskType :: String -> String
 haskType = \case
@@ -124,351 +177,92 @@ haskType = \case
   "uint64_t" -> "Word64"
   "int32_t" -> "Int32"
   "size_t" -> "CSize"
+  "wl_display" -> "WlDisplay"
+  "wl_surface" -> "WlSurface"
+  "xcb_connection_t" -> "XcbConnection"
+  "xcb_visualid_t" -> "XcbVisualId"
+  "xcb_window_t" -> "XcbWindow"
   x -> x
 
 haskType' :: String -> String
 haskType' "void" = "Ptr ()" -- for *pNext
 haskType' rest = haskType rest
 
-data Registry = Registry
-  { registryTypes :: [Type]
-  , registryEnums :: [Enumeratees]
-  , registryCommands :: [Command]
-  , registryFeatures :: [Feature]
-  , registryExtensions :: [Extension]
-  } deriving (Eq, Show)
+showCommentedTypes :: [(String, String)] -> String
+showCommentedTypes [(ret, comment)] =
+  ret ++ if comment /= "" then " -- ^ " ++ comment else ""
+showCommentedTypes xs = intercalate "\n  -> " $ map (showCommentedTypes.(:[])) xs
 
-data Type =
-    Struct
-    { typeName :: String
-    , typeMembers :: [Member]
-    , typeValidity :: [String]
-    , typeReturnedOnly :: Bool
+mapToHask :: Registry -> Registry
+mapToHask (Registry {..}) = Registry
+  { registryTypes = flip map registryTypes $ \case
+      x@(Struct { typeName = "VkImageBlit", ..}) ->
+        x { typeMembers =
+              [ Member "srcSubresource" "VkImageSubresourceLayers" Nothing False Nothing False
+              , Member "srcOffset0" "VkOffset3D" Nothing False Nothing False
+              , Member "srcOffset1" "VkOffset3D" Nothing False Nothing False
+              , Member "dstSubresource" "VkImageSubresourceLayers" Nothing False Nothing False
+              , Member "dstOffset0" "VkOffset3D" Nothing False Nothing False
+              , Member "dstOffset1" "VkOffset3D" Nothing False Nothing False ] }
+      x@(Struct {..}) -> x { typeMembers = map mappingMember typeMembers }
+      x@(Union {..}) -> x { typeMembers = map mappingMember typeMembers }
+      x@(Basetype {..}) -> x { typeType = haskType typeType }
+      x@(Handle { typeType = "VK_DEFINE_HANDLE", ..}) ->
+        x { typeType = "Ptr ()" }
+      x@(Handle { typeType = "VK_DEFINE_NON_DISPATCHABLE_HANDLE", ..}) ->
+        x { typeType = "Int64" }
+      x@(Funcpointer {..}) ->
+        x { typeArgs = map haskType' typeArgs ++ [funcpointerReturns typeName] }
+      rest -> rest
+  , registryEnums = registryEnums
+  , registryCommands = flip map registryCommands $ \x@(Command {..}) ->
+      x { commandReturn = haskType commandReturn
+        , commandParameters = map mappingParameter commandParameters
+        }
+  , registryFeatures = registryFeatures
+  , registryExtensions = registryExtensions
+  }
+
+mappingMember :: Member -> Member
+mappingMember m@(Member { memberEnum = Just enum, .. }) =
+  m { memberType = "Ptr " ++ haskType' memberType }
+mappingMember m@(Member { memberType = "char", .. }) =
+  m { memberType = case length . elemIndices ',' <$> memberLen of
+                     Just 0 -> "CString"
+                     Just 1 -> "Ptr CString"
     }
-  | Union
-    { typeName :: String
-    , typeComment :: String
-    , typeMembers :: [Member]
-    }
-  | Include
-    { typeName :: String }
-  | RequireOther
-    { typeName :: String
-    , typeRequires :: String
-    }
-  | Define
-    { typeName :: String
-    , typeDecl :: String
-    }
-  | Basetype
-    { typeName :: String
-    , typeType :: String
-    }
-  | Bitmask
-    { typeName :: String
-    , typeType :: String
-    , typeRequires :: String
-    }
-  | Handle
-    { typeName :: String
-    , typeType :: String
-    , typeParent :: Maybe String
-    }
-  | EnumType
-    { typeName :: String }
-  | Funcpointer
-    { typeName :: String
-    , typeArgs :: [String]
-    }
-  deriving (Eq, Show)
-
-data Member = Member
-  { memberName :: String
-  , memberType :: String
-  , memberEnum :: Maybe String
-  , memberOptional :: Bool
-  , memberLen :: Maybe String
-  , memberNoautovalidity :: Bool
-  } deriving (Eq, Show)
-
-data Enumeratees = Enumeratees
-  { enumsName :: String
-  , enumsType :: String
-  , enumsExpand :: Maybe String
-  , enumsComment :: String
-  , enumsList :: [Enumeratee]
-  } deriving (Eq, Show)
-
-data Enumeratee =
-    EnumValue
-    { enumName :: String
-    , enumValue :: String
-    , enumComment :: String
-    }
-  | EnumBitpos
-    { enumName :: String
-    , enumBitpos :: Int
-    , enumComment :: String
-    }
-  deriving (Eq, Show)
-
-data EnumExt =
-    NewEnum
-    { enumEName :: String
-    , enumEValue :: String
-    , enumEComment :: String
-    }
-  | ExtendValue
-    { enumEName :: String
-    , enumEValue :: String
-    , enumEExtend :: String
-    , enumEComment :: String
-    }
-  | ExtendOffset
-    { enumEName :: String
-    , enumEOffset :: Int
-    , enumEExtend :: String
-    , enumEComment :: String
-    }
-  | ExtendBitpos
-    { enumEName :: String
-    , enumEBitpos :: Int
-    , enumEExtend :: String
-    , enumEComment :: String
-    }
-  deriving (Eq, Show)
-
-data Command = Command
-  { commandName :: String
-  , commandReturn :: String
-  , commandSuccessCodes :: String
-  , commandErrorCodes :: String
-  , commandQueues :: String
-  , commandRenderpass :: String
-  , commandCmdBufferLevel :: String
-  , commandParameters :: [Parameter]
-  , commandImplicitExternSyncParams :: [String]
-  , commandValidity :: [String]
-  } deriving (Eq, Show)
-
-data Parameter = Parameter
-  { parameterName :: String
-  , parameterType :: String
-  , parameterOptional :: String -- "true", "false,true"
-  , parameterExternsync :: String -- "true", ...
-  , parameterLen :: Maybe String
-  , parameterNoautovalidity :: Bool
-  } deriving (Eq, Show)
-
-data Feature = Feature
-  { featureName :: String
-  , featureRequires :: [Require]
-  , featureRemoves :: [Remove]
-  } deriving (Eq, Show)
-
-data Require = Require
-  { requireComment :: String
-  , requireTypes :: [String]
-  , requireEnums :: [String]
-  , requireCommands :: [String]
-  } deriving (Eq, Show)
-
-data Remove = Remove deriving (Eq, Show)
-
-data Extension = Extension
-  { extensionName :: String
-  , extensionAuthor :: Maybe String
-  , extensionContact :: Maybe String
-  , extensionSupport :: String
-  , extensionProtect :: Maybe String
-  , extensionRequires :: [RequireExt]
-  } deriving (Eq, Show)
-
-data RequireExt = RequireExt
-  { requireExtTypes :: [String]
-  , requireExtEnums :: [EnumExt]
-  , requireExtCommands :: [String]
-  , requireExtUsage :: [(String, String)]
-  } deriving (Eq, Show)
-
-to :: ArrowXml a => String -> a XmlTree XmlTree
-to name = hasName name <<< isElem <<< getChildren
-
-perhaps :: ArrowIf a => a b c -> a b (Maybe c)
-perhaps x = (arr Just <<< x) `orElse` constA Nothing
-
-boolean :: ArrowIf a => a b String -> a b Bool
-boolean x = (arr (\x -> if x == "true" then True else error x) <<< x)
-            `orElse` constA False
-
-getContent :: ArrowXml a => a XmlTree String
-getContent = getText <<< getChildren
-
-parse :: IOSLA (XIOState ()) XmlTree Registry
-parse = proc x -> do
-  registry <- to "registry" -< x
-  types <- listA $ parseTypes <<< to "types" -< registry
-  enums <- listA $ parseEnums <<< to "enums" -< registry
-  commands <- listA $ parseCommand <<< to "commands" -< registry
-  features <- listA $ parseFeature <<< to "feature" -< registry
-  extensions <- listA $ parseExtension <<< to "extensions" -< registry
-  returnA -< Registry
-    { registryTypes = types
-    , registryEnums = enums
-    , registryCommands = commands
-    , registryFeatures = features
-    , registryExtensions = extensions
+mappingMember m@(Member { memberType = "void", .. }) =
+  m { memberType = "Ptr ()" } -- for VkSpecializationInfo_pData
+mappingMember m@(Member {..}) =
+  m { memberType = case length . elemIndices ',' <$> memberLen of
+                     Nothing -> haskType' memberType
+                     Just 0 -> "Ptr " ++ haskType' memberType
     }
 
-parseTypes :: (ArrowXml a, ArrowChoice a) => a XmlTree Type
-parseTypes = proc x -> do
-  t <- to "type" -< x
-  category <- perhaps (getAttrValue0 "category") -< t
-  case category of
-    Just "struct" -> do
-      name <- getAttrValue0 "name" -< t
-      members <- listA $ parseMembers <<< to "member" -< t
-      validity <- listA $ getContent <<< to "usage" <<< to "validity" -< t
-      retonly <- boolean (getAttrValue0 "returnedonly") -< t
-      returnA -< Struct name members validity retonly
-    Just "union" -> do
-      name <- getAttrValue0 "name" -< t
-      comment <- getAttrValue "comment" -< t
-      members <- listA $ parseMembers <<< to "member" -< t
-      returnA -< Union name comment members
-    Just "basetype" -> do
-      name <- getContent <<< to "name" -< t
-      typ <- getContent <<< to "type" -< t
-      returnA -< Basetype name typ
-    Just "bitmask" -> do
-      name <- getContent <<< to "name" -< t
-      typ <- getContent <<< to "type" -< t
-      requires <- getAttrValue "requires" -< t
-      returnA -< Bitmask name typ requires
-    Just "enum" -> do
-      name <- getAttrValue0 "name" -< t
-      returnA -< EnumType name
-    _ -> zeroArrow -< t
+mappingParameter :: Parameter -> Parameter
+-- avoid haskell keywords
+mappingParameter p@(Parameter { parameterName = "instance", .. }) =
+  mappingParameter p { parameterName = "vulkan" }
+mappingParameter p@(Parameter { parameterName = "type", .. }) =
+  mappingParameter p { parameterName = "imageType" }
+mappingParameter p@(Parameter { parameterName = "data", .. }) =
+  mappingParameter p { parameterName = "word" }
+-- fix type
+mappingParameter p@(Parameter { parameterType = "char", .. }) =
+  p { parameterType = case length . elemIndices ',' <$> parameterLen of
+                        Nothing -> "CString" -- fix accident in xml
+                        Just 0 -> "CString"
+                        Just 1 -> "Ptr CString"
+    }
+mappingParameter p@(Parameter {..}) =
+  p { parameterType = haskType' parameterType }
 
-parseMembers :: ArrowXml a => a XmlTree Member
-parseMembers = proc x -> do
-  name <- getContent <<< to "name" -< x
-  typ <- getContent <<< to "type" -< x
-  enum <- perhaps (getContent <<< to "enum") -< x
-  optional <- boolean (getAttrValue0 "optional") -< x
-  len <- perhaps (getAttrValue0 "len") -< x
-  nav <- boolean (getAttrValue0 "noautovalidity") -< x
-  returnA -< Member name typ enum optional len nav
+funcpointerReturns :: String -> String
+funcpointerReturns "PFN_vkInternalAllocationNotification" = "IO ()"
+funcpointerReturns "PFN_vkInternalFreeNotification" = "IO ()"
+funcpointerReturns "PFN_vkReallocationFunction" = "IO (Ptr ())"
+funcpointerReturns "PFN_vkAllocationFunction" = "IO (Ptr ())"
+funcpointerReturns "PFN_vkFreeFunction" = "IO ()"
+funcpointerReturns "PFN_vkVoidFunction" = "FunPtr ()"
+funcpointerReturns "PFN_vkDebugReportCallbackEXT" = "IO VkBool32"
 
-parseEnums :: ArrowXml a => a XmlTree Enumeratees
-parseEnums = proc x -> do
-  name <- getAttrValue0 "name" -< x
-  typ <- getAttrValue0 "type" -< x
-  expand <- perhaps (getAttrValue0 "expand") -< x
-  comment <- getAttrValue "comment" -< x
-  enums <- listA $ parseEnum -< x
-  returnA -< Enumeratees name typ expand comment enums
-
-parseEnum :: ArrowXml a => a XmlTree Enumeratee
-parseEnum = proc x -> do
-  enum <- to "enum" -< x
-  name <- getAttrValue0 "name" -< enum
-  mvalue <- perhaps (getAttrValue0 "value") -< enum
-  mbitpos <- perhaps (getAttrValue0 "bitpos") -< enum
-  comment <- getAttrValue "comment" -< enum
-  returnA -< case (mvalue, mbitpos) of
-    (Just value, Nothing) ->
-      EnumValue name value comment
-    (Nothing, Just bitpos) ->
-      EnumBitpos name (read bitpos) comment
-    unexpected -> error (show unexpected)
-
-parseCommand :: ArrowXml a => a XmlTree Command
-parseCommand = proc x -> do
-  command <- to "command" -< x
-  name <- getContent <<< to "name" <<< to "proto" -< command
-  ret <- getContent <<< to "type" <<< to "proto" -< command
-  successcodes <- getAttrValue "successcodes" -< command
-  errorcodes <- getAttrValue "errorcodes" -< command
-  queue <- getAttrValue "queue" -< command
-  renderpass <- getAttrValue "renderpass" -< command
-  buflevel <- getAttrValue "cmdbufferlevel" -< command
-  params <- listA $ parseParameters <<< to "param" -< command
-  syncparams <- listA $ getContent <<< to "param"
-                          <<< to "implicitecommandternsyncparams" -< command
-  validity <- listA $ getContent <<< to "usage" <<< to "validity" -< command
-  returnA -< Command name ret successcodes errorcodes queue renderpass
-                     buflevel params syncparams validity
-
-parseParameters :: ArrowXml a => a XmlTree Parameter
-parseParameters = proc x -> do
-  name <- getContent <<< to "name" -< x
-  typ <- getContent <<< to "type" -< x
-  optional <- getAttrValue "optional" -< x
-  externalsync <- getAttrValue "externsync" -< x
-  len <- perhaps (getAttrValue0 "len") -< x
-  noautovalidity <- boolean (getAttrValue0 "noautovalidity") -< x
-  returnA -< Parameter name typ optional externalsync len noautovalidity
-
-parseFeature :: ArrowXml a => a XmlTree Feature
-parseFeature = proc x -> do
-  name <- getAttrValue0 "name" -< x
-  require <- listA $ parseRequire <<< to "require" -< x
-  remove <- listA $ parseRemove <<< to "remove" -< x
-  returnA -< Feature name require remove
-
-parseRequire :: ArrowXml a => a XmlTree Require
-parseRequire = proc x -> do
-  comment <- getAttrValue "comment" -< x
-  types <- listA $ getAttrValue0 "name" <<< to "type" -< x
-  enums <- listA $ getAttrValue0 "name" <<< to "enum" -< x
-  commands <- listA $ getAttrValue0 "name" <<< to "command" -< x
-  returnA -< Require comment types enums commands
-
-parseRemove :: ArrowXml a => a XmlTree Remove
-parseRemove = zeroArrow
-
-parseExtension :: ArrowXml a => a XmlTree Extension
-parseExtension = proc x -> do
-  extension <- to "extension" -< x
-  name <- getAttrValue0 "name" -< extension
-  author <- perhaps (getAttrValue0 "author") -< extension
-  contact <- perhaps (getAttrValue0 "contact") -< extension
-  supported <- getAttrValue0 "supported" -< extension
-  protect <- perhaps (getAttrValue0 "protect") -< extension
-  require <- listA $ parseRequireExt <<< to "require" -< extension
-  returnA -< Extension name author contact supported protect require
-
-parseRequireExt :: ArrowXml a => a XmlTree RequireExt
-parseRequireExt = proc x -> do
-  types <- listA $ getAttrValue0 "name" <<< to "type" -< x
-  enums <- listA $ parseEnumExt -< x
-  commands <- listA $ getAttrValue0 "name" <<< to "command" -< x
-  usages <- listA $ parseUsage <<< to "usage" -< x
-  returnA -< RequireExt types enums commands usages
-
-parseEnumExt :: ArrowXml a => a XmlTree EnumExt
-parseEnumExt = proc x -> do
-  enum <- to "enum" -< x
-  name <- getAttrValue0 "name" -< enum
-  mvalue <- perhaps (getAttrValue0 "value") -< enum
-  moffset <- perhaps (getAttrValue0 "offset") -< enum
-  mbitpos <- perhaps (getAttrValue0 "bitpos") -< enum
-  mextend <- perhaps (getAttrValue0 "extends") -< enum
-  comment <- getAttrValue "comment" -< enum
-  returnA -< case (mvalue, moffset, mbitpos, mextend) of
-    (Just value, Nothing, Nothing, Nothing) ->
-      NewEnum name value comment
-    (Just value, Nothing, Nothing, Just extend) ->
-      ExtendValue name value extend comment
-    (Nothing, Just offset, Nothing, Just extend) ->
-      ExtendOffset name (read offset) extend comment
-    (Nothing, Nothing, Just bitpos, Just extend) ->
-      ExtendBitpos name (read bitpos) extend comment
-    unexpected -> error (show unexpected)
-
-parseUsage :: ArrowXml a => a XmlTree (String, String)
-parseUsage = proc x -> do
-  command <- getAttrValue0 "command" -< x
-  text <- getContent -< x
-  returnA -< (command, text)
