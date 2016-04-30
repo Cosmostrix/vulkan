@@ -1,5 +1,14 @@
 {-# LANGUAGE Arrows #-}
--- | Parse vk.xml
+-----------------------------------------------------------------------------
+-- |
+-- Copyright   :  (C) 2016 Cosmostrix
+-- License     :  BSD-style (see the file LICENSE)
+-- Maintainer  :  Cosmostrix <cosmos@lunakit.org>
+-- Stability   :  experimental
+-- Portability :  portable
+--
+-- Parse vk.xml
+----------------------------------------------------------------------------
 module VkParser (parseVkXml) where
 import Text.XML.HXT.Core
 import VkRegistry

@@ -1,4 +1,13 @@
--- | Datatypes corresponding to vk.xml
+-----------------------------------------------------------------------------
+-- |
+-- Copyright   :  (C) 2016 Cosmostrix
+-- License     :  BSD-style (see the file LICENSE)
+-- Maintainer  :  Cosmostrix <cosmos@lunakit.org>
+-- Stability   :  experimental
+-- Portability :  portable
+-- 
+-- Datatypes corresponding to vk.xml
+----------------------------------------------------------------------------
 module VkRegistry where
 
 data Registry = Registry
