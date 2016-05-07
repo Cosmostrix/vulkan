@@ -10,6 +10,7 @@
 -- Parse vk.xml
 ----------------------------------------------------------------------------
 module VkParser (parseVkXml) where
+import Control.Applicative ((<|>))
 import Text.XML.HXT.Core
 import VkRegistry
 
@@ -22,9 +23,12 @@ to name = hasName name <<< isElem <<< getChildren
 perhaps :: ArrowIf a => a b c -> a b (Maybe c)
 perhaps x = (arr Just <<< x) `orElse` constA Nothing
 
+match :: (ArrowIf a) => String -> a b String -> a b Bool
+match str x = (constA True <<< isA ((== str) . filter (/= ' ')) <<< x)
+              `orElse` constA False
+
 boolean :: ArrowIf a => a b String -> a b Bool
-boolean x = (arr (\x -> if x == "true" then True else error x) <<< x)
-            `orElse` constA False
+boolean = match "true"
 
 getContent :: ArrowXml a => a XmlTree String
 getContent = getText <<< getChildren
@@ -81,18 +85,31 @@ parseTypes = proc x -> do
     Just "funcpointer" -> do
       name <- getContent <<< to "name" -< t
       args <- listA $ getContent <<< to "type" -< t
-      returnA -< Funcpointer name args
+      returnA -< Funcpointer name (map (:[]) args)
+    Nothing -> do
+      name <- getAttrValue0 "name" -< t
+      requires <- getAttrValue0 "requires" -< t
+      returnA -< RequireType name requires
     _ -> zeroArrow -< t
 
 parseMembers :: ArrowXml a => a XmlTree Member
 parseMembers = proc x -> do
   name <- getContent <<< to "name" -< x
   typ <- getContent <<< to "type" -< x
+  star1 <- match "*" getContent -< x
+  star2 <- match "**" getContent -< x
+  star2' <- match "*const*" getContent -< x
+  let typ' = if star1 then ["*", typ]
+        else if star2 || star2' then ["*", "*", typ]
+        else [typ]
+  const <- match "const" getContent -< x
   enum <- perhaps (getContent <<< to "enum") -< x
-  optional <- boolean (getAttrValue0 "optional") -< x
+  items <- perhaps (isA (`elem` ["[2]","[3]","[4]"]) <<< getContent) -< x
+  optional <- getAttrValue "optional" -< x
+  externsync <- getAttrValue "externsync" -< x -- <param> only
   len <- perhaps (getAttrValue0 "len") -< x
   nav <- boolean (getAttrValue0 "noautovalidity") -< x
-  returnA -< Member name typ enum optional len nav
+  returnA -< Member name typ' const (enum <|> items) optional externsync len nav
 
 parseEnums :: ArrowXml a => a XmlTree Enumeratees
 parseEnums = proc x -> do
@@ -127,22 +144,12 @@ parseCommand = proc x -> do
   queue <- getAttrValue "queue" -< command
   renderpass <- getAttrValue "renderpass" -< command
   buflevel <- getAttrValue "cmdbufferlevel" -< command
-  params <- listA $ parseParameters <<< to "param" -< command
+  params <- listA $ parseMembers <<< to "param" -< command
   syncparams <- listA $ getContent <<< to "param"
                           <<< to "implicitecommandternsyncparams" -< command
   validity <- listA $ getContent <<< to "usage" <<< to "validity" -< command
-  returnA -< Command name ret successcodes errorcodes queue renderpass
+  returnA -< Command name [ret] successcodes errorcodes queue renderpass
                      buflevel params syncparams validity
-
-parseParameters :: ArrowXml a => a XmlTree Parameter
-parseParameters = proc x -> do
-  name <- getContent <<< to "name" -< x
-  typ <- getContent <<< to "type" -< x
-  optional <- getAttrValue "optional" -< x
-  externalsync <- getAttrValue "externsync" -< x
-  len <- perhaps (getAttrValue0 "len") -< x
-  noautovalidity <- boolean (getAttrValue0 "noautovalidity") -< x
-  returnA -< Parameter name typ optional externalsync len noautovalidity
 
 parseFeature :: ArrowXml a => a XmlTree Feature
 parseFeature = proc x -> do

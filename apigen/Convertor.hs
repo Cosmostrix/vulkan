@@ -15,8 +15,9 @@ module Convertor (mapToHask) where
 import Data.List (elemIndices)
 import VkRegistry
 
-haskType :: String -> String
-haskType = \case
+haskType :: [String] -> [String]
+haskType = map $ \case
+  "*" -> "Ptr"
   "void" -> "()"
   "char" -> "CChar"
   "float" -> "Float"
@@ -32,80 +33,66 @@ haskType = \case
   "xcb_window_t" -> "XcbWindow"
   x -> x
 
-haskType' :: String -> String
-haskType' "void" = "Ptr ()" -- for *pNext
-haskType' rest = haskType rest
+haskType' :: [String] -> [String]
+haskType' ["void"] = ["Ptr", "()"]
+haskType' xs = haskType xs
 
 mapToHask :: Registry -> Registry
 mapToHask (Registry {..}) = Registry
   { registryTypes = flip map registryTypes $ \case
-      x@(Struct { typeName = "VkImageBlit", ..}) ->
-        x { typeMembers =
-              [ Member "srcSubresource" "VkImageSubresourceLayers" Nothing False Nothing False
-              , Member "srcOffset0" "VkOffset3D" Nothing False Nothing False
-              , Member "srcOffset1" "VkOffset3D" Nothing False Nothing False
-              , Member "dstSubresource" "VkImageSubresourceLayers" Nothing False Nothing False
-              , Member "dstOffset0" "VkOffset3D" Nothing False Nothing False
-              , Member "dstOffset1" "VkOffset3D" Nothing False Nothing False ] }
       x@(Struct {..}) -> x { typeMembers = map mappingMember typeMembers }
       x@(Union {..}) -> x { typeMembers = map mappingMember typeMembers }
-      x@(Basetype {..}) -> x { typeType = haskType typeType }
+      x@(RequireType {..}) -> x { typeName = head $ haskType [typeName] }
+      x@(Basetype {..}) -> x { typeType = head $ haskType [typeType] }
       x@(Handle { typeType = "VK_DEFINE_HANDLE", ..}) ->
         x { typeType = "Ptr ()" }
       x@(Handle { typeType = "VK_DEFINE_NON_DISPATCHABLE_HANDLE", ..}) ->
         x { typeType = "Int64" }
       x@(Funcpointer {..}) ->
-        x { typeArgs = map haskType' typeArgs ++ [funcpointerReturns typeName] }
+        x { typeArgs = map haskType' typeArgs ++ ["IO" : funcpointerReturns typeName] }
       rest -> rest
   , registryEnums = registryEnums
   , registryCommands = flip map registryCommands $ \x@(Command {..}) ->
       x { commandReturn = haskType commandReturn
-        , commandParameters = map mappingParameter commandParameters
+        , commandParameters = map mappingMember commandParameters
         }
-  , registryFeatures = registryFeatures
+  , registryFeatures = flip map registryFeatures $ \x@(Feature {..}) ->
+      if featureName == "VK_VERSION_1_0"
+      then x { featureRequires = drop 3 featureRequires }
+      else x
   , registryExtensions = registryExtensions
   }
 
 mappingMember :: Member -> Member
-mappingMember m@(Member { memberEnum = Just enum, .. }) =
-  m { memberType = "Ptr " ++ haskType' memberType }
-mappingMember m@(Member { memberType = "char", .. }) =
-  m { memberType = case length . elemIndices ',' <$> memberLen of
-                     Just 0 -> "CString"
-                     Just 1 -> "Ptr CString"
-    }
-mappingMember m@(Member { memberType = "void", .. }) =
-  m { memberType = "Ptr ()" } -- for VkSpecializationInfo_pData
-mappingMember m@(Member {..}) =
-  m { memberType = case length . elemIndices ',' <$> memberLen of
-                     Nothing -> haskType' memberType
-                     Just 0 -> "Ptr " ++ haskType' memberType
-    }
-
-mappingParameter :: Parameter -> Parameter
 -- avoid haskell keywords
-mappingParameter p@(Parameter { parameterName = "instance", .. }) =
-  mappingParameter p { parameterName = "vulkan" }
-mappingParameter p@(Parameter { parameterName = "type", .. }) =
-  mappingParameter p { parameterName = "imageType" }
-mappingParameter p@(Parameter { parameterName = "data", .. }) =
-  mappingParameter p { parameterName = "word" }
+mappingMember p@(Member { memberName = "instance", .. }) =
+  mappingMember p { memberName = "vulkan" }
+mappingMember p@(Member { memberName = "type", .. }) =
+  mappingMember p { memberName = "imageType" }
+mappingMember p@(Member { memberName = "data", .. }) =
+  mappingMember p { memberName = "word" }
+mappingMember p@(Member { memberName = "module", .. }) =
+  mappingMember p { memberName = "shaderModule" }
 -- fix type
-mappingParameter p@(Parameter { parameterType = "char", .. }) =
-  p { parameterType = case length . elemIndices ',' <$> parameterLen of
-                        Nothing -> "CString" -- fix accident in xml
-                        Just 0 -> "CString"
-                        Just 1 -> "Ptr CString"
-    }
-mappingParameter p@(Parameter {..}) =
-  p { parameterType = haskType' parameterType }
+--mappingMember m@(Member { memberType = ["char"], .. }) =
+--  m { memberType = case length . elemIndices ',' <$> memberLen of
+--                        Nothing -> ["CString"] -- *char[enum]
+--                        Just 0 -> ["CString"]
+--                        Just 1 -> ["Ptr", "CString"]
+--    }
+mappingMember m@(Member { memberEnum = Just enum, .. }) = case enum of
+  "[2]" -> m { memberType = "V2" : haskType memberType, memberEnum = Nothing }
+  "[3]" -> m { memberType = "V3" : haskType memberType, memberEnum = Nothing }
+  "[4]" -> m { memberType = "V4" : haskType memberType, memberEnum = Nothing }
+  enum -> m { memberType = "Ptr" : haskType memberType } -- !!!!
+mappingMember m@(Member {..}) = m { memberType = haskType memberType }
 
-funcpointerReturns :: String -> String
-funcpointerReturns "PFN_vkInternalAllocationNotification" = "IO ()"
-funcpointerReturns "PFN_vkInternalFreeNotification" = "IO ()"
-funcpointerReturns "PFN_vkReallocationFunction" = "IO (Ptr ())"
-funcpointerReturns "PFN_vkAllocationFunction" = "IO (Ptr ())"
-funcpointerReturns "PFN_vkFreeFunction" = "IO ()"
-funcpointerReturns "PFN_vkVoidFunction" = "FunPtr ()"
-funcpointerReturns "PFN_vkDebugReportCallbackEXT" = "IO VkBool32"
+funcpointerReturns :: String -> [String]
+funcpointerReturns "PFN_vkInternalAllocationNotification" = ["()"]
+funcpointerReturns "PFN_vkInternalFreeNotification" = ["()"]
+funcpointerReturns "PFN_vkReallocationFunction" = ["Ptr", "()"]
+funcpointerReturns "PFN_vkAllocationFunction" = ["Ptr", "()"]
+funcpointerReturns "PFN_vkFreeFunction" = ["()"]
+funcpointerReturns "PFN_vkVoidFunction" = ["FunPtr", "()"]
+funcpointerReturns "PFN_vkDebugReportCallbackEXT" = ["VkBool32"]
 

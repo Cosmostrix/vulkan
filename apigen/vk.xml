@@ -990,9 +990,9 @@ maintained in the master branch of the Khronos Vulkan Github project.
         </type>
         <type category="struct" name="VkImageBlit">
             <member><type>VkImageSubresourceLayers</type> <name>srcSubresource</name></member>
-            <member><type>VkOffset3D</type>             <name>srcOffsets[2]</name></member>                      <!-- Specified in pixels for both compressed and uncompressed images -->
+            <member><type>VkOffset3D</type>             <name>srcOffsets</name>[2]</member>                      <!-- Specified in pixels for both compressed and uncompressed images -->
             <member><type>VkImageSubresourceLayers</type> <name>dstSubresource</name></member>
-            <member><type>VkOffset3D</type>             <name>dstOffsets[2]</name></member>                     <!-- Specified in pixels for both compressed and uncompressed images -->
+            <member><type>VkOffset3D</type>             <name>dstOffsets</name>[2]</member>                     <!-- Specified in pixels for both compressed and uncompressed images -->
             <validity>
                 <usage>The pname:aspectMask member of pname:srcSubresource and pname:dstSubresource must: match</usage>
                 <usage>The pname:layerCount member of pname:srcSubresource and pname:dstSubresource must: match</usage>

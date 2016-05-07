@@ -32,7 +32,7 @@ data Type =
     }
   | Include
     { typeName :: String }
-  | RequireOther
+  | RequireType
     { typeName :: String
     , typeRequires :: String
     }
@@ -58,15 +58,17 @@ data Type =
     { typeName :: String }
   | Funcpointer
     { typeName :: String
-    , typeArgs :: [String]
+    , typeArgs :: [[String]]
     }
   deriving (Eq, Show)
 
 data Member = Member
   { memberName :: String
-  , memberType :: String
+  , memberType :: [String]
+  , memberConst :: Bool
   , memberEnum :: Maybe String
-  , memberOptional :: Bool
+  , memberOptional :: String -- "true", "false,true"
+  , parameterExternsync :: String -- "true", ...
   , memberLen :: Maybe String
   , memberNoautovalidity :: Bool
   } deriving (Eq, Show)
@@ -120,24 +122,15 @@ data EnumExt =
 
 data Command = Command
   { commandName :: String
-  , commandReturn :: String
+  , commandReturn :: [String]
   , commandSuccessCodes :: String
   , commandErrorCodes :: String
   , commandQueues :: String
   , commandRenderpass :: String
   , commandCmdBufferLevel :: String
-  , commandParameters :: [Parameter]
+  , commandParameters :: [Member]
   , commandImplicitExternSyncParams :: [String]
   , commandValidity :: [String]
-  } deriving (Eq, Show)
-
-data Parameter = Parameter
-  { parameterName :: String
-  , parameterType :: String
-  , parameterOptional :: String -- "true", "false,true"
-  , parameterExternsync :: String -- "true", ...
-  , parameterLen :: Maybe String
-  , parameterNoautovalidity :: Bool
   } deriving (Eq, Show)
 
 data Feature = Feature
