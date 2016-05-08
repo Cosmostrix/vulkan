@@ -109,6 +109,7 @@ data EnumExt =
   | ExtendOffset
     { enumEName :: String
     , enumEOffset :: Int
+    , enumENegative :: Bool
     , enumEExtend :: String
     , enumEComment :: String
     }
@@ -154,6 +155,7 @@ data Extension = Extension
   , extensionContact :: Maybe String
   , extensionSupport :: String
   , extensionProtect :: Maybe String
+  , extensionNumber :: Int
   , extensionRequires :: [RequireExt]
   } deriving (Eq, Show)
 

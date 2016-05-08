@@ -9,10 +9,11 @@ import Text.Shakespeare.Text
 import Data.Monoid
 import Data.Char (toLower, toUpper)
 import Data.Bits
+import Data.List (nub)
 import Foreign
 import Foreign.C.Types
 import Data.Text.Internal.Builder
-import System.IO (openFile, IOMode(WriteMode))
+import System.IO (openFile, IOMode(WriteMode), hClose)
 
 import VkRegistry
 import VkParser
@@ -28,68 +29,118 @@ main = do
 main' :: String -> String -> IO ()
 main' src destdir = do
   registry@(Registry {..}) <- mapToHask <$> parseVkXml src
-  let gd = gatherCommands registry
   let sd = mkSizeDict registry
-  yield <- case destdir of
-    "" -> return L.putStrLn
-    "-" -> return L.putStrLn
-    dir -> openFile (dir ++ "/Bindings.hs") WriteMode >>= return . L.hPutStrLn
-  yield [lt|{-# LANGUAGE CPP #-}
+  (yield, close) <- case destdir of
+    "" -> return (L.putStrLn, return ())
+    "-" -> return (L.putStrLn, return ())
+    dir -> do
+      h <- openFile (dir ++ "/Bindings.hs") WriteMode
+      return (L.hPutStrLn h, hClose h)
+  yield [lt|{-# LANGUAGE DataKinds #-}
 {-# LANGUAGE PatternSynonyms #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
-{- # LANGUAGE Strict #-}
-{- # LANGUAGE StrictData #-}
+{- LANGUAGE Strict #-}
+{- LANGUAGE StrictData #-}
 -----------------------------------------------------------------------------
 -- |
 -- Copyright   :  (C) 2016 Cosmostrix
 -- License     :  BSD-style (see the file LICENSE)
 -- Maintainer  :  Cosmostrix <cosmos@lunakit.org>
 -- Stability   :  experimental
--- Portability :  portable
+-- Portability :  DataKinds, PatternSynonyms, GeneralizedNewtypeDeriving
 --
 -- Complete Vulkan raw API bindings.
 ----------------------------------------------------------------------------
 module Graphics.Vulkan.Bindings (
-  -- Vk1
-    VkSampleMask
-  , VkBool32
+    castToFixedString
+  , pattern VK_HEADER_VERSION
+  , pattern VK_LOD_CLAMP_NONE
+  --, pattern VK_REMAINING_MIP_LEVELS
+  --, pattern VK_REMAINING_ARRAY_LAYERS
+  --, pattern VK_WHOLE_SIZE
+  --, pattern VK_ATTACHMENT_UNUSED
+  , pattern VK_TRUE
+  , pattern VK_FALSE
+  --, pattern VK_QUEUE_FAMILY_IGNORED
+  --, pattern VK_SUBPASS_EXTERNAL
+  --, Display
+  --, VisualID
+  --, Window
+  --, ANativeWindow
+  --, MirConnection
+  --, MirSurface
+  --, WlDisplay
+  --, WlSurface
+  --, HINSTANCE
+  --, HWND
+  --, XcbConnection
+  --, XcbVisualId
+  --, XcbWindow
+  , VkSampleMask
+  , VkResult
   , VkFlags
-  , VkDeviceSize|]
-  forM_ registryFeatures $ \(Feature {..}) -> do
-    yield [lt|-- * #{featureName}|]
-    forM_ featureRequires $ \(Require {..}) -> do
-      let types = concatMap ("\n  , " ++) requireTypes
-      -- let deps = concatMap ("\n  , " ++) 
-      let enums = concatMap ("\n  , pattern " ++) requireEnums
-      let commands = concatMap ("\n  , " ++) requireCommands
-      yield [lt|-- ** #{requireComment}#{types}#{enums}#{commands}
-|]
-  yield "-- * Extensions"
-  forM_ registryExtensions $ \(Extension {..}) -> do
-    yield [lt|-- ** #{extensionName}
--- Author: #{show extensionAuthor}
--- Contact: #{show extensionContact}
--- Support: #{extensionSupport}
--- Protect: #{show extensionProtect}|]
-    forM_ extensionRequires $ \(RequireExt {..}) -> do
-      let types = concatMap ("\n  , " ++) requireExtTypes
-      let enums = concatMap (("\n  , pattern " ++) . enumEName) requireExtEnums
-      let commands = concatMap ("\n  , " ++) requireExtCommands
-      yield [lt|-- #{types}#{enums}#{commands}
-|]
+  , VulkanSetup(..)
+  , getVulkanSetup
+  , Vulkan(..)
+  , getVulkan|]
+  let listF = flip concatMap registryFeatures $ \(Feature {..}) ->
+        [lt|-- * #{featureName}|] :
+        (flip concatMap featureRequires $ \(Require {..}) ->
+        let types = map (", " <>) (renderExports registry requireTypes)
+            enums = map ((", pattern " <>) . pack) requireEnums
+            commands = map (", " <>) $
+                         renderExportCommands registry requireCommands
+        in [lt|-- ** #{requireComment}|] : (types ++ enums ++ commands) )
+  let listE = "-- * Extensions" : (flip concatMap registryExtensions $ \(Extension {..}) ->
+        [lt|
+  -- ** #{extensionName}
+  -- Author: #{show extensionAuthor}
+  -- Contact: #{show extensionContact}
+  -- Support: #{extensionSupport}
+  -- Protect: #{show extensionProtect}
+|] :
+        (flip concatMap extensionRequires $ \(RequireExt {..}) ->
+          let types = map (", " <>) (renderExports registry requireExtTypes)
+              enums = map ((", pattern " <>) . pack . enumEName) requireExtEnums
+              commands = map ((", " <>).pack) requireExtCommands
+          in types ++ enums ++ commands))
+  yield [lt|  #{intercalate "\n  " (nub $ listF ++ listE)}|]
   yield [lt|) where
 import Foreign
 import Foreign.C
 import Data.Bits
 import Data.Int
 import Data.Word
+import Data.Maybe (fromJust)
+import Data.Vector (fromListN)
 import Linear
+import Linear.V
 import Numeric.Half
 import Numeric.Fixed
 import Control.Monad.IO.Class
+import System.IO.Unsafe (unsafePerformIO)
 
-type Invoker a = FunPtr a -> a
-foreign import ccall unsafe "&vkGetInstanceProcAddr" fp_vkGetInstanceProcAddr :: FunPtr (VkInstance -> Ptr CChar -> IO PFN_vkVoidFunction)
+-- | This function is only safe on the first 256 characters.
+castToFixedString :: Dim n => String -> V n CChar
+castToFixedString x = result
+  where d = dim result
+        result = fromJust . fromVector . fromListN d $
+                   map castCharToCChar (x ++ replicate (d - length x) '\0')
+
+foreign import ccall unsafe "&vkGetInstanceProcAddr" fp_vkGetInstanceProcAddr :: FunPtr (VkInstance -> Ptr CChar -> IO (FunPtr a))
+
+fp_vkCreateInstance :: FunPtr (Ptr VkInstanceCreateInfo -> Ptr VkAllocationCallbacks -> Ptr VkInstance -> IO VkResult)
+fp_vkCreateInstance = castFunPtr $ unsafePerformIO (getInstanceProcAddr nullPtr "vkCreateInstance")
+
+fp_vkEnumerateInstanceLayerProperties :: FunPtr (Ptr Word32 -> Ptr VkLayerProperties -> IO VkResult)
+fp_vkEnumerateInstanceLayerProperties = castFunPtr $ unsafePerformIO (getInstanceProcAddr nullPtr "vkEnumerateInstanceLayerProperties")
+
+fp_vkEnumerateInstanceExtensionProperties :: FunPtr (Ptr CChar -> Ptr Word32 -> Ptr VkExtensionProperties -> IO VkResult)
+fp_vkEnumerateInstanceExtensionProperties = castFunPtr $ unsafePerformIO (getInstanceProcAddr nullPtr "vkEnumerateInstanceExtensionProperties")
+
+getInstanceProcAddr :: VkInstance -> String -> IO (FunPtr a)
+getInstanceProcAddr vulkan proc =
+        return . castFunPtr =<< withCAString proc (vkGetInstanceProcAddr vulkan)
 
 pattern VK_HEADER_VERSION = 6
 --    <type name="VK_API_VERSION"/>
@@ -98,16 +149,16 @@ pattern VK_HEADER_VERSION = 6
 --    <type name="VK_VERSION_MINOR"/>
 --    <type name="VK_VERSION_PATCH"/>
 --    <type name="VK_HEADER_VERSION"/>
---    <enum name="VK_LOD_CLAMP_NONE"/>
---    <enum name="VK_REMAINING_MIP_LEVELS"/>
---    <enum name="VK_REMAINING_ARRAY_LAYERS"/>
---    <enum name="VK_WHOLE_SIZE"/>
---    <enum name="VK_ATTACHMENT_UNUSED"/>
---    <enum name="VK_TRUE"/>
---    <enum name="VK_FALSE"/>
+pattern VK_LOD_CLAMP_NONE = 1000
+--pattern VK_REMAINING_MIP_LEVELS = maxBound
+--pattern VK_REMAINING_ARRAY_LAYERS = maxBound
+--pattern VK_WHOLE_SIZE = maxBound
+--pattern VK_ATTACHMENT_UNUSED = maxBound
+pattern VK_TRUE = 1
+pattern VK_FALSE = 0
 --    <type name="VK_NULL_HANDLE"/>
---    <enum name="VK_QUEUE_FAMILY_IGNORED"/>
---    <enum name="VK_SUBPASS_EXTERNAL"/>
+--pattern VK_QUEUE_FAMILY_IGNORED = maxBound
+--pattern VK_SUBPASS_EXTERNAL = maxBound
 --    <type name="VkPipelineCacheHeaderVersion"/>
 
 -- X11/Xlib.h
@@ -135,20 +186,36 @@ type XcbConnection = Ptr () -- ^ xcb_connection_t
 type XcbVisualId = Ptr () -- ^ xcb_visualid_t
 type XcbWindow = Ptr () -- ^ xcb_window_t
 |]
-  let caps = makeCapability registry
-  forM_ caps $ \cap -> do
-    yield (renderCapabilityData cap)
-    yield (renderCapabilityTest cap)
-  --forM_ registryFeatures $ \feature ->
-  --  yield $ renderFeatureData registryCommands feature
-  --forM_ registryExtensions $ \extension ->
-  --  yield $ renderExtensionData registryCommands extension
+  let postInitCommands =
+        filter ((`notElem` preInitCommands) . commandName) registryCommands
+  let instanceCommands = filter (not . isDispatchableCommand) postInitCommands
+  let deviceCommands = filter isDispatchableCommand postInitCommands
+  yield [lt|
+data VulkanSetup = VulkanSetup
+  { #{intercalate "\n  , " (map showFpField instanceCommands)}
+  }
+
+getVulkanSetup :: MonadIO m => VkInstance -> m VulkanSetup
+getVulkanSetup vulkan = liftIO $ return VulkanSetup
+  #{intercalate "\n    " (renderApp "getInstanceProcAddr vulkan" instanceCommands)}
+
+data Vulkan = Vulkan
+  { #{intercalate "\n  , " (map showFpField deviceCommands)}
+  }
+
+getVulkan :: MonadIO m => VulkanSetup -> VkDevice -> m Vulkan
+getVulkan vks device = liftIO $ do
+  let getDeviceProcAddr proc =
+        return . castFunPtr =<< withCAString proc (vkGetDeviceProcAddr vks device)
+  return Vulkan
+    #{intercalate "\n    " (renderApp "getDeviceProcAddr" deviceCommands)}
+|]
+
   forM_ registryTypes $ \case
     struct@(Struct {..}) -> do
       yield (renderData struct)
       yield (renderStorable sd struct)
     union@(Union {..}) -> do
-      putStrLn (show union)
       yield (renderData union)
       yield (renderStorable sd union)
     Basetype {..} ->
@@ -159,8 +226,10 @@ type #{typeName} = #{typeType}|]
     Handle {..} ->
       yield [lt|-- | Parent: #{show typeParent}
 type #{typeName} = #{typeType}|]
-    Funcpointer {..} ->
-      yield [lt|type #{typeName} = #{intercalate " -> " (map showType typeArgs)}|]
+    Funcpointer {..} -> do
+      let sig = intercalate " -> " (map showType typeArgs)
+      yield [lt|type #{typeName} = FunPtr (#{sig})|]
+      yield [lt|foreign import ccall unsafe "wrapper" ffi_#{typeName} :: (#{sig}) -> IO (FunPtr (#{sig}))|]
     _ -> return ()
   forM_ registryEnums $ \(Enumeratees {..}) -> do
     let derivings = case enumsType of
@@ -171,25 +240,51 @@ newtype #{enumsName} = #{enumsName} Int deriving #{derivings}
 
 #{mconcat $ map (showEnum enumsName) enumsList}
 |]
-  forM_ registryCommands $ \(Command {..}) -> do
+  forM_ registryCommands $ \command@(Command {..}) -> do
+    let isPreInitCommand = commandName `elem` preInitCommands
     let arguments = intercalate " " $ map (pack.memberName) commandParameters
     let types = intercalate " -> " $
           [ [lt|#{memberType m}|] | m <- commandParameters ] ++ [[lt|IO #{commandReturn}|]]
+    let fpdata = if isDispatchableCommand command
+                 then "Vulkan" else "VulkanSetup" :: String
     let commentedTypes = intercalate "\n  -> " $
           map showParameter commandParameters ++ [[lt|m #{commandReturn}|]]
     yield [lt|
+foreign import ccall unsafe "dynamic" ffi_#{commandName} :: FunPtr (#{types}) -> (#{types})
+
 -- | @#{commandName} #{arguments}@
 -- #{showUsage commandValidity}
 -- 
 -- s:#{commandSuccessCodes} e:#{commandErrorCodes} q:#{commandQueues} rp:#{commandRenderpass} cbl:#{commandCmdBufferLevel} iesp:#{show commandImplicitExternSyncParams}
-#{commandName}
-  :: MonadIO m => Vk1
+#{commandName}|]
+    if isPreInitCommand
+    then yield [lt|  :: MonadIO m
+  => #{commentedTypes}
+#{commandName} #{arguments} =
+  liftIO (ffi_#{commandName} fp_#{commandName} #{arguments})
+|]  else yield [lt|  :: MonadIO m => #{fpdata}
   -> #{commentedTypes}
 #{commandName} vk #{arguments} =
   liftIO (ffi_#{commandName} (fp_#{commandName} vk) #{arguments})
-
-foreign import ccall unsafe "dynamic" ffi_#{commandName} :: FunPtr (#{types}) -> (#{types})
 |]
+  forM_ registryExtensions $ \(Extension {..}) -> do
+    forM_ extensionRequires $ \(RequireExt {..}) -> do
+      forM_ requireExtEnums $ \case
+        NewEnum {..} -> yield [lt|-- | #{enumEComment}
+pattern #{enumEName} = #{enumEValue}|]
+        ExtendValue {..} -> yield [lt|-- | #{enumEComment}
+pattern #{enumEName} = #{enumEExtend} #{enumEValue}|]
+        ExtendOffset {..} -> yield [lt|-- | #{enumEComment}
+pattern #{enumEName} = #{enumEExtend} #{value'}|]
+          where value' = if enumENegative
+                         then [lt|(-#{show value})|]
+                         else [lt|#{show value}|]
+                value = 1000000000 + (extensionNumber - 1) * 1000 + enumEOffset
+        ExtendBitpos {..} -> yield [lt|-- | #{enumEComment}
+pattern #{enumEName} = #{enumEExtend} #{value}|]
+          where value = bit enumEBitpos :: Int
+  yield "-- End of File"
+  close
 
 showUsage :: [String] -> String
 showUsage xs = mconcat [ "\n-- * " ++ x | x <- xs ]
@@ -221,13 +316,13 @@ renderData (Union {..}) =
   [lt|data #{typeName} = #{constructors} --deriving (Eq, Show)|]
   where constructors = intercalate " | " $ map showCon typeMembers
         showCon (Member {..}) =
-          [lt|#{typeName}#{upperCamel memberName} #{memberType}|]
+          [lt|#{(typeName ++ upperCamel memberName) : memberType}|]
 
 structLayout :: SizeDict -> [Member] -> [(String, (Int, Int))]
 structLayout sd members = uncurry zip $ (map memberName &&& layout) members
   where offsets (x : xs) = x : map (addp x) (offsets xs)
         layout :: [Member] -> [(Int, Int)]
-        layout xs = offsets $ (0, 0) : map (sizeOfType sd . memberType) xs
+        layout xs = offsets $ (0, 0) : map (sizeOfMember sd) xs
 
 renderStorable :: SizeDict -> Type -> Text
 renderStorable sd (Struct {..}) =
@@ -238,7 +333,7 @@ renderStorable sd (Struct {..}) =
       poke (name, pos) = [lt|poke (plusPtr ptr (#{showSize pos})) #{name}|]
   in [lt|-- ReturnedOnly = #{show typeReturnedOnly}
 instance Storable #{typeName} where
-  alignment = alignment (undefined :: CSize)
+  alignment _ = alignment (undefined :: CSize)
   sizeOf _ = #{showSize $ sizeOfType sd [typeName]}
   peek ptr = do
     #{impl peek}
@@ -248,13 +343,13 @@ instance Storable #{typeName} where
 |]
 renderStorable sd (Union {..}) = [lt|-- ReturnedOnly = False
 instance Storable #{typeName} where
-  alignment = alignment (undefined :: CSize)
+  alignment _ = alignment (undefined :: CSize)
   sizeOf _ = #{showSize $ sizeOfType sd [typeName]}
   peek = error "cannot peek C union"
   #{impl' poke'}
 |] where impl' f = (intercalate "\n  " <<< map f) typeMembers
          poke' (Member {..}) =
-           [lt|poke ptr (#{typeName}#{upperCamel memberName} a) = poke ptr a|]
+           [lt|poke ptr (#{typeName}#{upperCamel memberName} a) = poke (castPtr ptr) a|]
 
 showParameter :: Member -> Text
 showParameter m@(Member {..}) = [lt|#{memberType}#{comment m}|]
@@ -263,7 +358,10 @@ comment :: Member -> Text
 comment (Member {..}) = if body /= "" then "\n  -- ^ " <> body else "" 
   where
   body = intercalate " " $ filter (/= "") [opt, sync, cons, enum, len, nav]
-  opt = if memberOptional == "" then "" else [lt|Optional=#{memberOptional}.|]
+  opt = case memberOptional of
+          "" -> ""
+          "true" -> "Can be `nullPtr`."
+          _ -> [lt|Optional=#{memberOptional}.|]
   sync = if parameterExternsync == "" then "" else [lt|ExternSync=#{parameterExternsync}.|]
   cons = if memberConst then "Const." else ""
   enum = maybe "" (\enum -> [lt|Max: #{enum}.|]) memberEnum
@@ -285,8 +383,8 @@ type SizeDict = [(String, (Int, Int))] -- (name, (bytes, csize))
 initSizeDict :: SizeDict
 initSizeDict =
   [ ("Float", (4,0)), ("Word8", (1,0)), ("Word32", (4,0)), ("Word64", (8,0))
-  , ("Int32", (4,0)), ("Int64", (8,0)), ("CSize", (0,1)), ("CString", (0,1))
-  , ("Ptr ()", (0,1))
+  , ("Int32", (4,0)), ("Int64", (8,0)), ("CSize", (0,1)), ("CChar", (1,0))
+  , ("Ptr ()", (0,1)), ("CString", (0,1))
   ]
 
 showSize :: (Int, Int) -> Text
@@ -296,14 +394,17 @@ showSize (bytes, pointers) =
 sizeOfType :: SizeDict -> [String] -> (Int, Int)
 sizeOfType dict [name] = maybe (-100000, -100000) id $ lookup name dict
 sizeOfType _ ("Ptr" : _) = (0, 1)
-sizeOfType d ("V2" : name) = mulp (2, 2) $ sizeOfType d name
-sizeOfType d ("V3" : name) = mulp (3, 3) $ sizeOfType d name
-sizeOfType d ("V4" : name) = mulp (4, 4) $ sizeOfType d name
+sizeOfType d ("V2" : name) = times 2 $ sizeOfType d name
+sizeOfType d ("V3" : name) = times 3 $ sizeOfType d name
+sizeOfType d ("V4" : name) = times 4 $ sizeOfType d name
+sizeOfType d (('V':' ':n) : name) = times (read n) $ sizeOfType d name
 
-addp, mulp, maxp :: (Num a, Ord a, Show a) => (a, a) -> (a, a) -> (a, a)
+addp, maxp :: (Num a, Ord a, Show a) => (a, a) -> (a, a) -> (a, a)
 addp (x, y) (z, w) = (x + z, y + w)
-mulp (x, y) (z, w) = (x * z, y * w)
 maxp (x, 0) (z, 0) = (max x z, 0)
+
+times :: Int -> (Int, Int) -> (Int, Int)
+times n (x, y) = (n * x, n * y)
 
 mkSizeDict :: Registry -> [(String, (Int, Int))]
 mkSizeDict (Registry {..}) =
@@ -321,19 +422,9 @@ mkSizeDict (Registry {..}) =
       Funcpointer {..} -> (typeName, (0, 1)) : dict
     sum' = foldl addp (0, 0)
     max' = foldl maxp (0, 0)
-    sizeOfMember dict m@(Member {..}) =
-      times (len memberEnum) $ sizeOfType dict memberType
-    times n (x, y) = (n * x, n * y)
-    len = \case
-        Nothing -> 1
-        -- API constants.
-        Just "VK_MAX_PHYSICAL_DEVICE_NAME_SIZE" -> 256
-        Just "VK_UUID_SIZE" -> 16
-        Just "VK_MAX_EXTENSION_NAME_SIZE" -> 256
-        Just "VK_MAX_DESCRIPTION_SIZE" -> 256
-        Just "VK_MAX_MEMORY_TYPES" -> 32
-        Just "VK_MAX_MEMORY_HEAPS" -> 16
-        Just x -> error x
+
+sizeOfMember :: SizeDict -> Member -> (Int, Int)  
+sizeOfMember dict = sizeOfType dict . memberType
 
 instance ToText [String] where
   toText = fromLazyText . showType
@@ -346,107 +437,16 @@ showType [p, q, a] = [lt|#{p} (#{q} #{a})|]
 snakeToCamel :: String -> String
 snakeToCamel = id
 
-renderFeatureData :: [Command] -> Feature -> Text
-renderFeatureData commands (Feature {..}) =
-  [lt|data #{snakeToCamel featureName} = #{snakeToCamel featureName}
-  { #{intercalate "\n  , " fields}
-  } deriving (Eq, Show)
-|] where
-  fields = [ showFpField command
-           | name <- concatMap requireCommands featureRequires
-           , command@(Command {..}) <- commands
-           , name == commandName ]
+renderApp :: String -> [Command] -> [Text]
+renderApp f xs = [ [lt|<*> #{f} "#{commandName}"|] | Command {..} <- xs ]
 
-renderExtensionData :: [Command] -> Extension -> Text
-renderExtensionData commands (Extension {..}) =
-  [lt|data #{snakeToCamel extensionName} = #{snakeToCamel extensionName}
-  { #{intercalate "\n  , " fields}
-  } deriving (Eq, Show)
-|] where
-  fields = [ showFpField command
-           | name <- concatMap requireExtCommands extensionRequires
-           , command@(Command {..}) <- commands
-           , name == commandName ]
-
-gatherCommands :: Registry -> [(String, String)]
-gatherCommands (Registry {..}) = feat ++ exts
-  where feat = [ (command, featureName)
-               | Feature {..} <- registryFeatures
-               , Require {..} <- featureRequires
-               , command <- requireCommands ]
-        exts = [ (command, extensionName)
-               | Extension {..} <- registryExtensions
-               , RequireExt {..} <- extensionRequires
-               , command <- requireExtCommands ]
---vkGetInstanceProcAddr x
--- vkEnumerateInstanceExtensionProperties NULL
--- vkEnumerateInstanceLayerProperties NULL
--- vkCreateInstance NULL
---vkGetDeviceProcAddr
--- VkDevice
--- VkQueue
--- VkCommandBuffer
-
---data Vulkan10Setup = {}
---data Vulkan10 = {}
-
-data Capability = Capability
-  { capabilityName :: String
-  , capabilityRequirements :: [(String, String)]
-  , capabilityTester :: String
-  , capabilityPrelude :: String
-  , capabilityGetter :: String
-  , capabilityCommands :: [Command]
-  } deriving Show
-
-findCapability :: [Capability] -> String -> String
-findCapability caps func = head
-  [ capabilityName
-  | Capability {..} <- caps
-  , Command {..} <- capabilityCommands
-  , commandName == func ]
-
-makeCapability :: Registry -> [Capability]
-makeCapability (Registry {..}) =
-  concatMap fromFeature registryFeatures -- ++ map fromExtension registryExtensions
-  where
-    fromFeature (Feature {..}) =
-      let commands = [ command
-           | name <- concatMap requireCommands featureRequires
-           , command@(Command {..}) <- registryCommands
-           , name `notElem` preInstanceCommands
-           , name == commandName ]
-      in
-      [ Capability "VulkanSetup"
-        [("vulkan", "VkInstance")]
-        "return (fp_vkGetInstanceProcAddr /= nullFunPtr)"
-        "let vkGetInstanceProcAddr = ffi_vkGetInstanceProcAddr fp_vkGetInstanceProcAddr"
-        "vkGetInstanceProcAddr vulkan"
-        (filter (not . isDispatchableCommand) commands)
-      , Capability "Vulkan10"
-        [("vks", "VulkanSetup"), ("device", "VkDevice")]
-        "return (fp_vkGetDeviceProcAddr vks /= nullFunPtr)"
-        "let vkGetDeviceProcAddr = ffi_vkGetDeviceProcAddr (fp_vkGetDeviceProcAddr vks)"
-        "vkGetDeviceProcAddr device"
-        (filter isDispatchableCommand commands)
-      ]
-    fromExtension (Extension {..}) =
-      [ ]
-
-preInstanceCommands :: [String]
-preInstanceCommands = ["vkGetInstanceProcAddr", "vkEnumerateInstanceExtensionProperties", "vkEnumerateInstanceLayerProperties", "vkCreateInstance"]
+preInitCommands :: [String]
+preInitCommands = ["vkGetInstanceProcAddr", "vkEnumerateInstanceExtensionProperties", "vkEnumerateInstanceLayerProperties", "vkCreateInstance"]
 
 isDispatchableCommand :: Command -> Bool
 isDispatchableCommand c | commandName c == "vkGetDeviceProcAddr" = False
 isDispatchableCommand c = (`elem` ["VkDevice", "VkQueue", "VkCommandBuffer"])
    . head . memberType . head . commandParameters $ c
-
-renderCapabilityData :: Capability -> Text
-renderCapabilityData (Capability {..}) =
-  [lt|data #{capabilityName} = #{capabilityName}
-  { #{intercalate "\n  , " (map showFpField capabilityCommands)}
-  } deriving (Eq, Show)
-|]
 
 showFpField :: Command -> Text
 showFpField (Command {..}) =
@@ -455,18 +455,21 @@ showFpField (Command {..}) =
           map (\x -> [lt|#{memberType x}|]) commandParameters
           ++ [[lt|#{"IO" : commandReturn}|]]
 
-renderCapabilityTest :: Capability -> Text
-renderCapabilityTest (Capability {..}) =
-  [lt|get#{capabilityName} :: MonadIO m => #{reqTypes}m (Maybe #{capabilityName})
-get#{capabilityName} #{reqArgs}= liftIO $ do
-  result <- #{capabilityTester}
-  #{capabilityPrelude}
-  if result then return . Just . #{capabilityName}
-    #{intercalate "\n    " capabilityGetters}
-  else return Nothing
-|] where reqTypes = concatMap (++ " -> ") (map snd capabilityRequirements)
-         reqArgs = concatMap (++ " ") (map fst capabilityRequirements)
-         capabilityGetters = [ [lt|<*> #{capabilityGetter} "#{commandName}"|]
-                             | Command {..} <- capabilityCommands ]
+renderExports :: Registry -> [String] -> [Text]
+renderExports (Registry {..}) typeNames = flip map typeNames $ \n ->
+  case findType n registryTypes of
+    Struct {..} -> pack typeName <> "(..)"
+    Union {..} -> pack typeName <> "(..)"
+    x -> pack (typeName x)
+  where findType n xs = head [ x | x <- xs, typeName x == n]
 
+renderExportCommands :: Registry -> [String] -> [Text]
+renderExportCommands r@(Registry {..}) = concatMap $ \c ->
+   let (Command {..}) = findCommand c
+       parameterTypes = concatMap (concatMap findVk . memberType) commandParameters
+       findVk xs = case xs of
+                     'V':'k':_ -> [xs]
+                     _ -> []
+   in pack commandName : renderExports r parameterTypes
+   where findCommand n = head [ x | x <- registryCommands, commandName x == n]
 

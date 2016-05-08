@@ -54,7 +54,8 @@ mapToHask (Registry {..}) = Registry
   , registryEnums = registryEnums
   , registryCommands = flip map registryCommands $ \x@(Command {..}) ->
       x { commandReturn = haskType commandReturn
-        , commandParameters = map mappingMember commandParameters
+        , commandParameters =
+            specialFix commandName $ map mappingMember commandParameters
         }
   , registryFeatures = flip map registryFeatures $ \x@(Feature {..}) ->
       if featureName == "VK_VERSION_1_0"
@@ -74,18 +75,24 @@ mappingMember p@(Member { memberName = "data", .. }) =
 mappingMember p@(Member { memberName = "module", .. }) =
   mappingMember p { memberName = "shaderModule" }
 -- fix type
---mappingMember m@(Member { memberType = ["char"], .. }) =
---  m { memberType = case length . elemIndices ',' <$> memberLen of
---                        Nothing -> ["CString"] -- *char[enum]
---                        Just 0 -> ["CString"]
---                        Just 1 -> ["Ptr", "CString"]
---    }
 mappingMember m@(Member { memberEnum = Just enum, .. }) = case enum of
-  "[2]" -> m { memberType = "V2" : haskType memberType, memberEnum = Nothing }
-  "[3]" -> m { memberType = "V3" : haskType memberType, memberEnum = Nothing }
-  "[4]" -> m { memberType = "V4" : haskType memberType, memberEnum = Nothing }
-  enum -> m { memberType = "Ptr" : haskType memberType } -- !!!!
+  "[2]" -> m { memberType = "V2" : haskType memberType }
+  "[3]" -> m { memberType = "V3" : haskType memberType }
+  "[4]" -> m { memberType = "V4" : haskType memberType }
+  "VK_MAX_PHYSICAL_DEVICE_NAME_SIZE" -> m { memberType = "V 256" : haskType memberType }
+  "VK_UUID_SIZE" -> m { memberType = "V 16" : haskType memberType }
+  "VK_MAX_EXTENSION_NAME_SIZE" -> m { memberType = "V 256" : haskType memberType }
+  "VK_MAX_DESCRIPTION_SIZE" -> m { memberType = "V 256" : haskType memberType }
+  "VK_MAX_MEMORY_TYPES" -> m { memberType = "V 32" : haskType memberType }
+  "VK_MAX_MEMORY_HEAPS" -> m { memberType = "V 16" : haskType memberType }
+  enum -> error $ show m { memberType = haskType memberType }
 mappingMember m@(Member {..}) = m { memberType = haskType memberType }
+
+specialFix :: String -> [Member] -> [Member]
+specialFix "vkCmdSetBlendConstants" (m1 : _) =
+  m1 : [f "blendConstant1", f "blendConstant2", f "blendConstant3", f "blendConstant4"]
+  where f x = Member x ["Float"] False Nothing "" "" Nothing False
+specialFix _ p = p
 
 funcpointerReturns :: String -> [String]
 funcpointerReturns "PFN_vkInternalAllocationNotification" = ["()"]
@@ -93,6 +100,6 @@ funcpointerReturns "PFN_vkInternalFreeNotification" = ["()"]
 funcpointerReturns "PFN_vkReallocationFunction" = ["Ptr", "()"]
 funcpointerReturns "PFN_vkAllocationFunction" = ["Ptr", "()"]
 funcpointerReturns "PFN_vkFreeFunction" = ["()"]
-funcpointerReturns "PFN_vkVoidFunction" = ["FunPtr", "()"]
+funcpointerReturns "PFN_vkVoidFunction" = ["()"]
 funcpointerReturns "PFN_vkDebugReportCallbackEXT" = ["VkBool32"]
 

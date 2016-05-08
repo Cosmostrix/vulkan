@@ -177,8 +177,9 @@ parseExtension = proc x -> do
   contact <- perhaps (getAttrValue0 "contact") -< extension
   supported <- getAttrValue0 "supported" -< extension
   protect <- perhaps (getAttrValue0 "protect") -< extension
+  number <- getAttrValue0 "number" -< extension
   require <- listA $ parseRequireExt <<< to "require" -< extension
-  returnA -< Extension name author contact supported protect require
+  returnA -< Extension name author contact supported protect (read number) require
 
 parseRequireExt :: ArrowXml a => a XmlTree RequireExt
 parseRequireExt = proc x -> do
@@ -194,17 +195,20 @@ parseEnumExt = proc x -> do
   name <- getAttrValue0 "name" -< enum
   mvalue <- perhaps (getAttrValue0 "value") -< enum
   moffset <- perhaps (getAttrValue0 "offset") -< enum
+  mdir <- perhaps (getAttrValue0 "dir") -< enum
   mbitpos <- perhaps (getAttrValue0 "bitpos") -< enum
   mextend <- perhaps (getAttrValue0 "extends") -< enum
   comment <- getAttrValue "comment" -< enum
-  returnA -< case (mvalue, moffset, mbitpos, mextend) of
-    (Just value, Nothing, Nothing, Nothing) ->
+  returnA -< case (mvalue, moffset, mdir, mbitpos, mextend) of
+    (Just value, Nothing, _, Nothing, Nothing) ->
       NewEnum name value comment
-    (Just value, Nothing, Nothing, Just extend) ->
+    (Just value, Nothing, _, Nothing, Just extend) ->
       ExtendValue name value extend comment
-    (Nothing, Just offset, Nothing, Just extend) ->
-      ExtendOffset name (read offset) extend comment
-    (Nothing, Nothing, Just bitpos, Just extend) ->
+    (Nothing, Just offset, Nothing, Nothing, Just extend) ->
+      ExtendOffset name (read offset) False extend comment
+    (Nothing, Just offset, Just "-", Nothing, Just extend) ->
+      ExtendOffset name (read offset) True extend comment
+    (Nothing, Nothing, _, Just bitpos, Just extend) ->
       ExtendBitpos name (read bitpos) extend comment
     unexpected -> error (show unexpected)
 

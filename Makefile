@@ -1,9 +1,11 @@
 .PHONY: all clean
 
-all: autogen
+all: src/Graphics/Vulkan/Bindings.hs
+	stack build
 
-autogen:
-	mkdir autogen
+src/Graphics/Vulkan/Bindings.hs: apigen/*.hs
+	(cd apigen; stack build :vulkan-apigen && \
+	 stack exec vulkan-apigen vk.xml ../src/Graphics/Vulkan )
 
 clean:
-	rm -rf autogen
+	rm -r src/Graphics/Vulkan/Bindings.hs
