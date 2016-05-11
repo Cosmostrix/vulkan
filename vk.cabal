@@ -10,7 +10,8 @@ maintainer:          cosmos@lunakit.org
 copyright:           2016 Cosmostrix
 category:            Graphics
 build-type:          Simple
--- extra-source-files:
+-- extra-source-files:  
+extra-doc-files:     *.png
 cabal-version:       >=1.10
 
 library

@@ -48,11 +48,25 @@ main' src destdir = do
 -- Maintainer  :  Cosmostrix <cosmos@lunakit.org>
 -- Stability   :  experimental
 -- Portability :  DataKinds, PatternSynonyms, GeneralizedNewtypeDeriving
---
--- Complete Vulkan raw API bindings.
+-- 
+-- <<Vulkan_170px_Mar15.png>>
+-- 
+-- Complete <https://www.khronos.org/vulkan/ Vulkan> raw API bindings.
+-- 
+-- * <https://www.khronos.org/assets/uploads/developers/library/overview/vulkan-overview.pdf Overview presentation>
+-- * <https://www.khronos.org/registry/vulkan Vulkan Registry>
+-- * <https://www.khronos.org/registry/vulkan/specs/1.0/refguide/Vulkan-1.0-web.pdf Online Quick Reference>
+-- * <https://github.com/KhronosGroup/Khronosdotorg/blob/master/api/vulkan/resources.md Vulkan Resources on Github>
+-- * <https://www.khronos.org/registry/vulkan/specs/1.0-wsi_extensions/pdf/vkspec.pdf Vulkan 1.0 Core API + WSI Extensions (PDF)>
 ----------------------------------------------------------------------------
 module Graphics.Vulkan.Bindings (
+  -- * Initialization
     castToFixedString
+  , getVulkanSetup
+  , getVulkan
+  , VulkanSetup(..)
+  , Vulkan(..)
+  -- * Misc
   , pattern VK_HEADER_VERSION
   , pattern VK_LOD_CLAMP_NONE
   , pattern VK_REMAINING_MIP_LEVELS
@@ -63,6 +77,7 @@ module Graphics.Vulkan.Bindings (
   , pattern VK_FALSE
   , pattern VK_QUEUE_FAMILY_IGNORED
   , pattern VK_SUBPASS_EXTERNAL
+  , VkFlags
   --, Display
   --, VisualID
   --, Window
@@ -75,12 +90,7 @@ module Graphics.Vulkan.Bindings (
   --, HWND
   --, XcbConnection
   --, XcbVisualId
-  --, XcbWindow
-  , VkFlags
-  , VulkanSetup(..)
-  , getVulkanSetup
-  , Vulkan(..)
-  , getVulkan|]
+  --, XcbWindow|]
   let listF = flip concatMap registryFeatures $ \(Feature {..}) ->
         [lt|-- * #{featureName}|] :
         (flip concatMap featureRequires $ \(Require {..}) ->
