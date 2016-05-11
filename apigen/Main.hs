@@ -2,12 +2,12 @@
 {-# LANGUAGE RecordWildCards #-}
 import Control.Arrow
 import Control.Monad (forM_)
-import Data.Text.Lazy (Text, pack, unpack, intercalate)
+import Data.Text.Lazy (Text, pack, unpack, intercalate, splitOn)
 import qualified Data.Text.Lazy.IO as L
 import System.Environment
 import Text.Shakespeare.Text
 import Data.Monoid
-import Data.Char (toLower, toUpper)
+import Data.Char (toLower, toUpper, isUpper)
 import Data.Bits
 import Data.List (nub)
 import Foreign
@@ -39,8 +39,8 @@ main' src destdir = do
   yield [lt|{-# LANGUAGE DataKinds #-}
 {-# LANGUAGE PatternSynonyms #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
-{- LANGUAGE Strict #-}
-{- LANGUAGE StrictData #-}
+{-# LANGUAGE ScopedTypeVariables #-}
+{- LANGUAGE DuplicateRecordFields #-}
 -----------------------------------------------------------------------------
 -- |
 -- Copyright   :  (C) 2016 Cosmostrix
@@ -55,14 +55,14 @@ module Graphics.Vulkan.Bindings (
     castToFixedString
   , pattern VK_HEADER_VERSION
   , pattern VK_LOD_CLAMP_NONE
-  --, pattern VK_REMAINING_MIP_LEVELS
-  --, pattern VK_REMAINING_ARRAY_LAYERS
-  --, pattern VK_WHOLE_SIZE
-  --, pattern VK_ATTACHMENT_UNUSED
+  , pattern VK_REMAINING_MIP_LEVELS
+  , pattern VK_REMAINING_ARRAY_LAYERS
+  , pattern VK_WHOLE_SIZE
+  , pattern VK_ATTACHMENT_UNUSED
   , pattern VK_TRUE
   , pattern VK_FALSE
-  --, pattern VK_QUEUE_FAMILY_IGNORED
-  --, pattern VK_SUBPASS_EXTERNAL
+  , pattern VK_QUEUE_FAMILY_IGNORED
+  , pattern VK_SUBPASS_EXTERNAL
   --, Display
   --, VisualID
   --, Window
@@ -76,8 +76,6 @@ module Graphics.Vulkan.Bindings (
   --, XcbConnection
   --, XcbVisualId
   --, XcbWindow
-  , VkSampleMask
-  , VkResult
   , VkFlags
   , VulkanSetup(..)
   , getVulkanSetup
@@ -102,7 +100,8 @@ module Graphics.Vulkan.Bindings (
         (flip concatMap extensionRequires $ \(RequireExt {..}) ->
           let types = map (", " <>) (renderExports registry requireExtTypes)
               enums = map ((", pattern " <>) . pack . enumEName) requireExtEnums
-              commands = map ((", " <>).pack) requireExtCommands
+              commands = map (", " <>) $
+                           renderExportCommands registry requireExtCommands
           in types ++ enums ++ commands))
   yield [lt|  #{intercalate "\n  " (nub $ listF ++ listE)}|]
   yield [lt|) where
@@ -142,24 +141,16 @@ getInstanceProcAddr :: VkInstance -> String -> IO (FunPtr a)
 getInstanceProcAddr vulkan proc =
         return . castFunPtr =<< withCAString proc (vkGetInstanceProcAddr vulkan)
 
-pattern VK_HEADER_VERSION = 6
---    <type name="VK_API_VERSION"/>
---    <type name="VK_API_VERSION_1_0"/>
---    <type name="VK_VERSION_MAJOR"/>
---    <type name="VK_VERSION_MINOR"/>
---    <type name="VK_VERSION_PATCH"/>
---    <type name="VK_HEADER_VERSION"/>
-pattern VK_LOD_CLAMP_NONE = 1000
---pattern VK_REMAINING_MIP_LEVELS = maxBound
---pattern VK_REMAINING_ARRAY_LAYERS = maxBound
---pattern VK_WHOLE_SIZE = maxBound
---pattern VK_ATTACHMENT_UNUSED = maxBound
-pattern VK_TRUE = 1
-pattern VK_FALSE = 0
---    <type name="VK_NULL_HANDLE"/>
---pattern VK_QUEUE_FAMILY_IGNORED = maxBound
---pattern VK_SUBPASS_EXTERNAL = maxBound
---    <type name="VkPipelineCacheHeaderVersion"/>
+pattern VK_HEADER_VERSION = 12
+pattern VK_LOD_CLAMP_NONE = 1000 :: Float
+pattern VK_REMAINING_MIP_LEVELS = 0xffffffff :: Word32
+pattern VK_REMAINING_ARRAY_LAYERS = 0xffffffff :: Word32
+pattern VK_WHOLE_SIZE = 0xffffffffffffffff :: Word64
+pattern VK_ATTACHMENT_UNUSED = 0xffffffff :: Word32
+pattern VK_TRUE = 1 :: VkBool32
+pattern VK_FALSE = 0 :: VkBool32
+pattern VK_QUEUE_FAMILY_IGNORED = 0xffffffff :: Word32
+pattern VK_SUBPASS_EXTERNAL = 0xffffffff :: Word32
 
 -- X11/Xlib.h
 type Display = Ptr ()
@@ -286,8 +277,11 @@ pattern #{enumEName} = #{enumEExtend} #{value}|]
   yield "-- End of File"
   close
 
-showUsage :: [String] -> String
-showUsage xs = mconcat [ "\n-- * " ++ x | x <- xs ]
+showUsage :: [String] -> Text
+showUsage xs = mconcat [ "\n-- * " <> formatUsage x | x <- xs ]
+
+formatUsage :: String -> Text
+formatUsage = intercalate "\n-- " . splitOn "\n" . pack
 
 braced :: [Text] -> [Text]
 braced [] = []
@@ -302,9 +296,24 @@ upperCamel :: String -> String
 upperCamel [] = []
 upperCamel (x:xs) = toUpper x : xs
 
+abbr :: String -> String
+abbr = map toLower . filter (\x -> isUpper x || x `elem` ['0'..'9'])
+
+conv "VkInstanceCreateInfo" = "VULKAN"
+-- conv "VkImageCreateInfo" = "VkImageCreateInfo"
+-- conv "VkComputePipelineCreateInfo" = "VkComputePipelineCreateInfo"
+conv "VkCommandPoolCreateInfo" = "VkCommandPOOLCreateInfo"
+conv "VkSamplerCreateInfo" = "VkSAMPLERCreateInfo"
+conv "VkSemaphoreCreateInfo" = "VkSEMAPHORECreateInfo"
+conv "VkFramebufferCreateInfo" = "VkFrameBufferCreateInfo"
+-- conv "VkFenceCreateInfo" = "VkFenceCreateInfo"
+conv "VkXlibSurfaceCreateInfoKHR" = "VkXLIBSurfaceCreateInfo"
+conv "VkXcbSurfaceCreateInfoKHR" = "VkXCBSurfaceCreateInfo"
+conv x = x
+
 showMember :: String -> Member -> Text
 showMember typeName m@(Member {..}) =
-  [lt|#{lowerCamel typeName}_#{memberName} :: #{memberType}#{comment m}|]
+  [lt|#{abbr (conv typeName)}_#{memberName} :: #{"!" : memberType}#{comment m}|]
 
 renderData :: Type -> Text
 renderData (Struct {..}) = [lt|
@@ -316,7 +325,7 @@ renderData (Union {..}) =
   [lt|data #{typeName} = #{constructors} --deriving (Eq, Show)|]
   where constructors = intercalate " | " $ map showCon typeMembers
         showCon (Member {..}) =
-          [lt|#{(typeName ++ upperCamel memberName) : memberType}|]
+          [lt|#{typeName ++ upperCamel memberName} #{"!" : memberType}|]
 
 structLayout :: SizeDict -> [Member] -> [(String, (Int, Int))]
 structLayout sd members = uncurry zip $ (map memberName &&& layout) members
@@ -431,8 +440,11 @@ instance ToText [String] where
 
 showType :: [String] -> Text
 showType [x] = pack x
+showType ["!", a] = [lt|!#{a}|]
 showType [p, a] = [lt|#{p} #{a}|]
+showType ["!", p, a] = [lt|!(#{p} #{a})|]
 showType [p, q, a] = [lt|#{p} (#{q} #{a})|]
+showType ["!", p, q, a] = [lt|!(#{p} (#{q} #{a}))|]
 
 snakeToCamel :: String -> String
 snakeToCamel = id
@@ -450,26 +462,32 @@ isDispatchableCommand c = (`elem` ["VkDevice", "VkQueue", "VkCommandBuffer"])
 
 showFpField :: Command -> Text
 showFpField (Command {..}) =
-  [lt|fp_#{commandName} :: FunPtr (#{commandType})|]
+  [lt|fp_#{commandName} :: !(FunPtr (#{commandType}))|]
   where commandType = intercalate " -> " $
           map (\x -> [lt|#{memberType x}|]) commandParameters
           ++ [[lt|#{"IO" : commandReturn}|]]
 
 renderExports :: Registry -> [String] -> [Text]
-renderExports (Registry {..}) typeNames = flip map typeNames $ \n ->
-  case findType n registryTypes of
-    Struct {..} -> pack typeName <> "(..)"
-    Union {..} -> pack typeName <> "(..)"
-    x -> pack (typeName x)
-  where findType n xs = head [ x | x <- xs, typeName x == n]
+renderExports r@(Registry {..}) typeNames = flip concatMap typeNames $ \n ->
+  case findType n of
+    Struct {..} -> pack typeName <> "(..)" :
+                     renderExports r (vkTypesInMembers typeMembers)
+    Union {..} -> pack typeName <> "(..)" :
+                    renderExports r (vkTypesInMembers typeMembers)
+    EnumType name -> pack name :
+                       map (pack . ("pattern " ++) . enumName) (findEnum n)
+    x -> [pack (typeName x)]
+  where findType n = head [ x | x <- registryTypes, typeName x == n]
+        findEnum n = head [enumsList e | e <- registryEnums, enumsName e == n]
 
 renderExportCommands :: Registry -> [String] -> [Text]
 renderExportCommands r@(Registry {..}) = concatMap $ \c ->
    let (Command {..}) = findCommand c
-       parameterTypes = concatMap (concatMap findVk . memberType) commandParameters
-       findVk xs = case xs of
-                     'V':'k':_ -> [xs]
-                     _ -> []
-   in pack commandName : renderExports r parameterTypes
+   in pack commandName : renderExports r (vkTypesInMembers commandParameters)
    where findCommand n = head [ x | x <- registryCommands, commandName x == n]
 
+vkTypesInMembers :: [Member] -> [String]
+vkTypesInMembers = concatMap (concatMap findVk . memberType)
+  where findVk xs = case xs of
+                      'V':'k':_ -> [xs]
+                      _ -> []

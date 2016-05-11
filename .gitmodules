@@ -1,0 +1,3 @@
+[submodule "apigen/Vulkan-Docs"]
+	path = apigen/Vulkan-Docs
+	url = https://github.com/KhronosGroup/Vulkan-Docs

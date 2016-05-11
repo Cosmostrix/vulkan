@@ -1,11 +1,14 @@
 .PHONY: all clean
 
-all: src/Graphics/Vulkan/Bindings.hs
+VK_SPEC := apigen/Vulkan-Docs/src/spec/vk.xml
+OUT_DIR := src/Graphics/Vulkan
+
+all: $(OUT_DIR)/Bindings.hs
 	stack build
 
-src/Graphics/Vulkan/Bindings.hs: apigen/*.hs
+src/Graphics/Vulkan/Bindings.hs: apigen/*.hs $(VK_SPEC)
 	(cd apigen; stack build :vulkan-apigen && \
-	 stack exec vulkan-apigen vk.xml ../src/Graphics/Vulkan )
+	 stack exec vulkan-apigen ../$(VK_SPEC) ../$(OUT_DIR) )
 
 clean:
-	rm -r src/Graphics/Vulkan/Bindings.hs
+	rm -r $(OUT_DIR)/Bindings.hs

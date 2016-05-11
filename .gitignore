@@ -1,5 +1,5 @@
 *.o
 *.hi
-/.stack-work
-/.cabal-sandbox
-/cabal.sandbox.config
+.stack-work
+.cabal-sandbox
+cabal.sandbox.config

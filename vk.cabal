@@ -1,6 +1,6 @@
-name:                vulkan
+name:                vk
 version:             0.1.0.0
-synopsis:            Complete Vulkan raw API bindings
+synopsis:            Complete Vulkan graphics API bindings
 description:         Please see README.md
 homepage:            https://github.com/Cosmostrix/vulkan#readme
 license:             BSD3
