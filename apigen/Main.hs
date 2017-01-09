@@ -1,5 +1,5 @@
 {-# LANGUAGE QuasiQuotes, OverloadedStrings, LambdaCase, FlexibleInstances #-}
-{-# LANGUAGE RecordWildCards #-}
+{-# LANGUAGE RecordWildCards, ViewPatterns #-}
 import Control.Arrow
 import Control.Monad (forM_)
 import Data.Text.Lazy (Text, pack, unpack, intercalate, splitOn)
@@ -18,16 +18,17 @@ import System.IO (openFile, IOMode(WriteMode), hClose)
 import VkRegistry
 import VkParser
 import Convertor
+import VkManual
 
 main :: IO ()
 main = do
   args <- getArgs
   case args of
-    [vk_xml, destdir] -> main' vk_xml destdir
-    _ -> putStrLn "Usage: vulkan-apigen vk.xml autogen"
+    vk_xml : destdir : man -> main' vk_xml destdir man
+    _ -> putStrLn "Usage: vulkan-apigen vk.xml autogen man/*"
 
-main' :: String -> String -> IO ()
-main' src destdir = do
+main' :: String -> String -> [String] -> IO ()
+main' src destdir manfiles = do
   registry@(Registry {..}) <- mapToHask <$> parseVkXml src
   let sd = mkSizeDict registry
   (yield, close) <- case destdir of
@@ -36,6 +37,7 @@ main' src destdir = do
     dir -> do
       h <- openFile (dir ++ "/Bindings.hs") WriteMode
       return (L.hPutStrLn h, hClose h)
+  Right man <- readVkMan manfiles
   yield [lt|{-# LANGUAGE DataKinds #-}
 {-# LANGUAGE PatternSynonyms #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
@@ -58,6 +60,8 @@ main' src destdir = do
 -- * <https://www.khronos.org/registry/vulkan/specs/1.0/refguide/Vulkan-1.0-web.pdf Online Quick Reference>
 -- * <https://github.com/KhronosGroup/Khronosdotorg/blob/master/api/vulkan/resources.md Vulkan Resources on Github>
 -- * <https://www.khronos.org/registry/vulkan/specs/1.0-wsi_extensions/pdf/vkspec.pdf Vulkan 1.0 Core API + WSI Extensions (PDF)>
+-- 
+-- Vulkan and the Vulkan logo are trademarks of the Khronos Group Inc.
 ----------------------------------------------------------------------------
 module Graphics.Vulkan.Bindings (
   -- * Initialization
@@ -214,10 +218,10 @@ getVulkan vks device = liftIO $ do
 
   forM_ registryTypes $ \case
     struct@(Struct {..}) -> do
-      yield (renderData struct)
+      yield (renderData (lookup man typeName) struct)
       yield (renderStorable sd struct)
     union@(Union {..}) -> do
-      yield (renderData union)
+      yield (renderData (lookup man typeName) union)
       yield (renderStorable sd union)
     Basetype {..} ->
       yield [lt|type #{typeName} = #{typeType}|]
@@ -254,7 +258,7 @@ newtype #{enumsName} = #{enumsName} Int deriving #{derivings}
 foreign import ccall unsafe "dynamic" ffi_#{commandName} :: FunPtr (#{types}) -> (#{types})
 
 -- | @#{commandName} #{arguments}@
--- #{showUsage commandValidity}
+-- #{showValidaty commandValidity}
 -- 
 -- s:#{commandSuccessCodes} e:#{commandErrorCodes} q:#{commandQueues} rp:#{commandRenderpass} cbl:#{commandCmdBufferLevel} iesp:#{show commandImplicitExternSyncParams}
 #{commandName}|]
@@ -270,22 +274,28 @@ foreign import ccall unsafe "dynamic" ffi_#{commandName} :: FunPtr (#{types}) ->
 |]
   forM_ registryExtensions $ \(Extension {..}) -> do
     forM_ extensionRequires $ \(RequireExt {..}) -> do
-      forM_ requireExtEnums $ \case
-        NewEnum {..} -> yield [lt|-- | #{enumEComment}
-pattern #{enumEName} = #{enumEValue}|]
-        ExtendValue {..} -> yield [lt|-- | #{enumEComment}
-pattern #{enumEName} = #{enumEExtend} #{enumEValue}|]
-        ExtendOffset {..} -> yield [lt|-- | #{enumEComment}
-pattern #{enumEName} = #{enumEExtend} #{value'}|]
-          where value' = if enumENegative
-                         then [lt|(-#{show value})|]
-                         else [lt|#{show value}|]
-                value = 1000000000 + (extensionNumber - 1) * 1000 + enumEOffset
-        ExtendBitpos {..} -> yield [lt|-- | #{enumEComment}
-pattern #{enumEName} = #{enumEExtend} #{value}|]
-          where value = bit enumEBitpos :: Int
+      forM_ requireExtEnums (yield . renderEnumExt extensionNumber)
   yield "-- End of File"
   close
+
+renderEnumExt :: Int -> EnumExt -> Text
+renderEnumExt extensionNumber = \case
+  NewEnum {..} -> [lt|-- | #{enumEComment}
+pattern #{enumEName} = #{enumEValue}|]
+  ExtendValue {..} -> [lt|-- | #{enumEComment}
+pattern #{enumEName} = #{enumEExtend} #{enumEValue}|]
+  ExtendOffset {..} -> [lt|-- | #{enumEComment}
+pattern #{enumEName} = #{enumEExtend} #{value'}|]
+    where value' = if enumENegative then [lt|(-#{show value})|]
+                                    else [lt|#{show value}|]
+          value = 1000000000 + (extensionNumber - 1) * 1000 + enumEOffset
+  ExtendBitpos {..} -> [lt|-- | #{enumEComment}
+pattern #{enumEName} = #{enumEExtend} #{value}|]
+    where value = bit enumEBitpos :: Int
+
+showValidaty :: [String] -> Text
+showValidaty [] = ""
+showValidaty xs = "\n-- == Validaty" <> showUsage xs
 
 showUsage :: [String] -> Text
 showUsage xs = mconcat [ "\n-- * " <> formatUsage x | x <- xs ]
@@ -325,13 +335,13 @@ showMember :: String -> Member -> Text
 showMember typeName m@(Member {..}) =
   [lt|#{abbr (conv typeName)}_#{memberName} :: #{"!" : memberType}#{comment m}|]
 
-renderData :: Type -> Text
-renderData (Struct {..}) = [lt|
--- |
--- #{showUsage typeValidity}
+renderData :: Man -> Type -> Text
+renderData man (Struct {..}) = [lt|
+-- | #{showMan typeName man}
+-- #{showValidaty typeValidity}
 data #{typeName} = #{typeName}#{render typeMembers} --deriving (Eq, Show)
 |] where render = intercalate "\n" . braced . map (showMember typeName)
-renderData (Union {..}) =
+renderData man (Union {..}) =
   [lt|data #{typeName} = #{constructors} --deriving (Eq, Show)|]
   where constructors = intercalate " | " $ map showCon typeMembers
         showCon (Member {..}) =
@@ -376,7 +386,8 @@ showParameter m@(Member {..}) = [lt|#{memberType}#{comment m}|]
 comment :: Member -> Text
 comment (Member {..}) = if body /= "" then "\n  -- ^ " <> body else "" 
   where
-  body = intercalate " " $ filter (/= "") [opt, sync, cons, enum, len, nav]
+  body = intercalate " " $ filter (/= "") [name, opt, sync, cons, enum, len, nav]
+  name = [lt|`#{memberName}` |]
   opt = case memberOptional of
           "" -> ""
           "true" -> "Can be `nullPtr`."
@@ -501,3 +512,17 @@ vkTypesInMembers = concatMap (concatMap findVk . memberType)
   where findVk xs = case xs of
                       'V':'k':_ -> [xs]
                       _ -> []
+
+showMan :: String -> Man -> Text
+showMan title man | lookup title man == Nothing = ""
+showMan title (lookup title -> Just (VkMan {..})) =
+  [lt|#{manSynopsis}
+-- 
+-- #{intercalate "\n--\n-- " $ map showManDesc manDescription}|]
+-- 
+-- Notes: #{show manNotes}
+-- 
+-- Seealso: #{show manSeealso}
+showManDesc :: String -> Text
+showManDesc = intercalate "\n-- " . splitOn "\n" . pack
+
