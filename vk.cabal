@@ -1,13 +1,13 @@
 name:                vk
 version:             0.1.0.0
-synopsis:            Complete Vulkan graphics API bindings
+synopsis:            Complete and pretty Vulkan graphics API bindings
 description:         Please see README.md
-homepage:            https://github.com/Cosmostrix/vulkan#readme
-license:             BSD3
+homepage:            https://github.com/Cosmostrix/vulkan
+license:             LGPL3
 license-file:        LICENSE
-author:              Cosmostrix
-maintainer:          cosmos@lunakit.org
-copyright:           2016 Cosmostrix
+author:              Sorafukurou <cosmos@lunakit.org>
+maintainer:          Sorafukurou <cosmos@lunakit.org>
+copyright:           2016 lunakit.org
 category:            Graphics
 build-type:          Simple
 -- extra-source-files:  
